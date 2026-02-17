@@ -1,0 +1,12 @@
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.csproj.AssemblyReference.cache
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.Properties.Resources.resources
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.csproj.GenerateResource.cache
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.csproj.CoreCompileInputs.cache
+C:\Users\Matt\source\repos\PersistentWorldAdmin\bin\Debug\PersistentWorldAdmin.exe.config
+C:\Users\Matt\source\repos\PersistentWorldAdmin\bin\Debug\PersistentWorldAdmin.exe
+C:\Users\Matt\source\repos\PersistentWorldAdmin\bin\Debug\PersistentWorldAdmin.pdb
+C:\Users\Matt\source\repos\PersistentWorldAdmin\bin\Debug\System.Data.SQLite.dll
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.csproj.CopyComplete
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.exe
+C:\Users\Matt\source\repos\PersistentWorldAdmin\obj\Debug\PersistentWorldAdmin.pdb
+C:\Users\Matt\source\repos\PersistentWorldAdmin\bin\Debug\Newtonsoft.Json.dll
