@@ -1,0 +1,2 @@
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistantWorld.csproj.AssemblyReference.cache
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistantWorld.csproj.CoreCompileInputs.cache
