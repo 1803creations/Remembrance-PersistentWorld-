@@ -7,6 +7,8 @@ using Rage.Native;
 using PersistentWorld.Database;
 using System.IO;
 using System.Linq;
+using LSPD_First_Response.Mod.API;
+using LSPD_First_Response.Engine.Scripting.Entities;
 
 namespace PersistentWorld.Computer
 {
@@ -16,8 +18,11 @@ namespace PersistentWorld.Computer
         private bool _isOpen = false;
         private bool _gameFrozen = false;
 
+        // Config settings
+        private Config _config;
+
         // UI state
-        private enum ScreenMode { Search, TicketMenu }
+        private enum ScreenMode { Search, TicketMenu, VehicleSelection, PersonDetails, VehicleDetails }
         private ScreenMode _currentScreen = ScreenMode.Search;
 
         private enum SearchMode { Vehicle, Person }
@@ -37,6 +42,7 @@ namespace PersistentWorld.Computer
         private List<string> _rightColumnResults = new List<string>();
         private List<Dictionary<string, object>> _lastPersonResults = null;
         private int _selectedResultIndex = -1;
+        private Dictionary<string, object> _currentVehicle = null;
 
         // Ticket menu state
         private List<TicketTemplate> _ticketTemplates = new List<TicketTemplate>();
@@ -47,6 +53,14 @@ namespace PersistentWorld.Computer
         private Dictionary<string, object> _currentSelectedPerson = null;
         private StringBuilder _citationLocation = new StringBuilder();
         private bool _showingArrests = false;
+
+        // Vehicle selection state
+        private List<Dictionary<string, object>> _availableVehicles = new List<Dictionary<string, object>>();
+        private Dictionary<string, object> _selectedVehicle = null;
+        private StringBuilder _vehicleSearchInput = new StringBuilder();
+        private List<string> _vehicleSuggestions = new List<string>();
+        private int _selectedVehicleSuggestionIndex = -1;
+        private bool _showVehicleSuggestions = false;
 
         // Quick search suggestions
         private List<string> _quickSuggestions = new List<string>();
@@ -67,8 +81,20 @@ namespace PersistentWorld.Computer
         // Person suggestions loaded from database
         private List<PersonSuggestion> _personSuggestions = new List<PersonSuggestion>();
 
-        // VEHICLE SUGGESTIONS - Loaded from database
-        private List<VehicleSuggestion> _vehicleSuggestions = new List<VehicleSuggestion>();
+        // Vehicle suggestions - Loaded from database
+        private List<VehicleSuggestion> _vehicleSuggestionsList = new List<VehicleSuggestion>();
+
+        // Currently pulled over suspect (from LSPDFR)
+        private Ped _currentSuspect = null;
+        private Vehicle _currentSuspectVehicle = null;
+        private string _currentSuspectName = "";
+
+        // Flag to track if autofill has been done this session
+        private bool _hasAutofilled = false;
+        private bool _hasAutoFilledPlate = false;
+
+        // Store original audio state
+        private string _originalAudioMode = null;
 
         private class PersonSuggestion
         {
@@ -81,6 +107,7 @@ namespace PersistentWorld.Computer
         // Vehicle suggestion class
         private class VehicleSuggestion
         {
+            public int Id { get; set; }
             public string LicensePlate { get; set; }
             public string Model { get; set; }
             public string OwnerName { get; set; }
@@ -109,9 +136,10 @@ namespace PersistentWorld.Computer
             }
         }
 
-        public ComputerScreen(DatabaseManager database)
+        public ComputerScreen(DatabaseManager database, Config config)
         {
             _database = database;
+            _config = config;
 
             // Get GTA V directory and build path to INI
             string gtaPath = AppDomain.CurrentDomain.BaseDirectory;
@@ -176,7 +204,7 @@ namespace PersistentWorld.Computer
 
                 if (allPeds != null)
                 {
-                    _vehicleSuggestions.Clear();
+                    _vehicleSuggestionsList.Clear();
                     foreach (var ped in allPeds)
                     {
                         // Check if person has vehicles
@@ -189,12 +217,14 @@ namespace PersistentWorld.Computer
                                 {
                                     string plate = vehicle.ContainsKey("license_plate") ? vehicle["license_plate"].ToString() : "";
                                     string model = vehicle.ContainsKey("vehicle_model") ? vehicle["vehicle_model"].ToString() : "";
+                                    int id = vehicle.ContainsKey("id") ? Convert.ToInt32(vehicle["id"]) : 0;
                                     string ownerName = $"{ped["first_name"]} {ped["last_name"]}";
 
-                                    if (!string.IsNullOrEmpty(plate))
+                                    if (!string.IsNullOrEmpty(plate) && id > 0)
                                     {
-                                        _vehicleSuggestions.Add(new VehicleSuggestion
+                                        _vehicleSuggestionsList.Add(new VehicleSuggestion
                                         {
+                                            Id = id,
                                             LicensePlate = plate.ToUpper(),
                                             Model = model,
                                             OwnerName = ownerName,
@@ -205,7 +235,7 @@ namespace PersistentWorld.Computer
                             }
                         }
                     }
-                    Game.LogTrivial($"[Computer] Loaded {_vehicleSuggestions.Count} vehicle suggestions");
+                    Game.LogTrivial($"[Computer] Loaded {_vehicleSuggestionsList.Count} vehicle suggestions");
                 }
             }
             catch (Exception ex)
@@ -395,17 +425,213 @@ namespace PersistentWorld.Computer
             _arrestTemplates.Add(new TicketTemplate { Title = "Grand Theft Auto", Description = "Stolen vehicle", Fine = 5000, Code = "PC 487", JailDays = 120, IsArrestable = true });
         }
 
+        private void GetCurrentPullover()
+        {
+            try
+            {
+                // Try to get the current pullover handle from LSPDFR
+                LHandle pullover = Functions.GetCurrentPullover();
+
+                if (pullover != null)
+                {
+                    // Get the suspect from the pullover
+                    _currentSuspect = Functions.GetPulloverSuspect(pullover);
+
+                    if (_currentSuspect != null && _currentSuspect.Exists())
+                    {
+                        // Get suspect's name from Persona
+                        var persona = Functions.GetPersonaForPed(_currentSuspect);
+                        if (persona != null)
+                        {
+                            if (!string.IsNullOrEmpty(persona.FullName) && persona.FullName != "John Doe")
+                            {
+                                _currentSuspectName = persona.FullName;
+                            }
+                            else
+                            {
+                                // Build name from parts
+                                string firstName = persona.Forename ?? "";
+                                string lastName = persona.Surname ?? "";
+                                _currentSuspectName = $"{firstName} {lastName}".Trim();
+
+                                if (string.IsNullOrEmpty(_currentSuspectName))
+                                    _currentSuspectName = "Unknown";
+                            }
+
+                            Game.LogTrivial($"[Computer] Pullover suspect found: {_currentSuspectName}");
+                        }
+
+                        // Get the vehicle they were pulled over in
+                        _currentSuspectVehicle = _currentSuspect.CurrentVehicle;
+
+                        if (_currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
+                        {
+                            Game.LogTrivial($"[Computer] Suspect vehicle: {_currentSuspectVehicle.LicensePlate}");
+                        }
+                    }
+                }
+                else
+                {
+                    // No active pullover
+                    _currentSuspect = null;
+                    _currentSuspectVehicle = null;
+                    _currentSuspectName = "";
+                }
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[Computer] Error getting pullover info: {ex.Message}");
+                _currentSuspect = null;
+                _currentSuspectVehicle = null;
+                _currentSuspectName = "";
+            }
+        }
+
+        private void AutoFillPullover()
+        {
+            // Only auto-fill if we haven't already done so this session
+            if (!_hasAutofilled && _currentSuspect != null && _currentSuspect.Exists() && !string.IsNullOrEmpty(_currentSuspectName) && _currentSuspectName != "Unknown")
+            {
+                // Switch to person mode
+                _currentSearchMode = SearchMode.Person;
+
+                // Split the name
+                string[] nameParts = _currentSuspectName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                if (nameParts.Length >= 1)
+                {
+                    _personFirstNameInput.Clear();
+                    _personFirstNameInput.Append(nameParts[0]);
+
+                    if (nameParts.Length > 1)
+                    {
+                        _personLastNameInput.Clear();
+                        _personLastNameInput.Append(string.Join(" ", nameParts.Skip(1)));
+                    }
+
+                    Game.LogTrivial($"[Computer] Auto-filled suspect name: {_currentSuspectName}");
+                }
+
+                _hasAutofilled = true;
+            }
+
+            // Auto-fill vehicle plate only once when computer first opens
+            if (!_hasAutoFilledPlate && _currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
+            {
+                string plate = _currentSuspectVehicle.LicensePlate;
+                if (!string.IsNullOrEmpty(plate))
+                {
+                    _vehiclePlateInput.Clear();
+                    _vehiclePlateInput.Append(plate);
+                    _hasAutoFilledPlate = true;
+                    Game.LogTrivial($"[Computer] Auto-filled vehicle plate: {plate}");
+                }
+            }
+
+            // Perform search if we have a suspect name and haven't autofilled yet
+            if (!_hasAutofilled && _currentSuspect != null && _currentSuspect.Exists() && !string.IsNullOrEmpty(_currentSuspectName) && _currentSuspectName != "Unknown")
+            {
+                // Small delay to let UI settle
+                GameFiber.Wait(100);
+                PerformSearch();
+            }
+        }
+
+        
+        private bool IsPlayerInEmergencyVehicle()
+        {
+            try
+            {
+                Ped playerPed = Game.LocalPlayer.Character;
+                if (playerPed == null || !playerPed.Exists())
+                    return false;
+
+                Vehicle currentVehicle = playerPed.CurrentVehicle;
+                if (currentVehicle == null || !currentVehicle.Exists())
+                    return false;
+
+                // Use native function to check vehicle class/type
+                // Vehicle class 18 is emergency vehicles in GTA V
+                int vehicleClass = NativeFunction.Natives.GET_VEHICLE_CLASS<int>(currentVehicle);
+
+                // Class 18 = Emergency vehicles (police, ambulance, firetruck)
+                return vehicleClass == 18;
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[Computer] Error checking emergency vehicle: {ex.Message}");
+                return false;
+            }
+        }
+
+        // FIXED: Freeze/stop audio using native functions
+        private void FreezeAudio(bool freeze)
+        {
+            try
+            {
+                if (freeze)
+                {
+                    // Store current audio mode (not volume, as that's not directly accessible)
+                    // Instead, we'll stop all sounds and set audio flags
+
+                    // Stop all currently playing sounds
+                    NativeFunction.Natives.STOP_ALL_SOUNDS();
+
+                    // Disable audio for the duration
+                    NativeFunction.Natives.SET_AUDIO_FLAG("AllowPoliceScannerDuringGameplay", false);
+                    NativeFunction.Natives.SET_AUDIO_FLAG("DisableFlightMusic", true);
+                    NativeFunction.Natives.SET_AUDIO_FLAG("DisableRadioOnMission", true);
+
+                    // Mute the radio if it's playing
+                    NativeFunction.Natives.SET_RADIO_TO_STATION_NAME("OFF");
+
+                    Game.LogTrivial("[Computer] Audio frozen (sounds stopped)");
+                }
+                else
+                {
+                    // Restore audio settings
+                    NativeFunction.Natives.SET_AUDIO_FLAG("AllowPoliceScannerDuringGameplay", true);
+                    NativeFunction.Natives.SET_AUDIO_FLAG("DisableFlightMusic", false);
+                    NativeFunction.Natives.SET_AUDIO_FLAG("DisableRadioOnMission", false);
+
+                    Game.LogTrivial("[Computer] Audio unfrozen");
+                }
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[Computer] Error freezing audio: {ex.Message}");
+            }
+        }
+
+        // MODIFIED: Show method with emergency vehicle check
         public void Show()
         {
+            // Check if player is in an emergency vehicle
+            if (!IsPlayerInEmergencyVehicle())
+            {
+                Game.DisplayNotification("~r~Computer access denied: Must be in an emergency vehicle");
+                Game.LogTrivial("[Computer] Attempted to open while not in emergency vehicle - denied");
+                return;
+            }
+
             if (_isOpen) return;
 
             _isOpen = true;
+            _hasAutofilled = false;
+            _hasAutoFilledPlate = false;
+
+            // Get current pullover info
+            GetCurrentPullover();
+
             ResetUI();
+
+            // Auto-fill the pullover info if available
+            AutoFillPullover();
 
             Game.LogTrivial("Computer opened");
             Game.DisplayNotification("Computer ~g~opened");
 
-            // Reload suggestions every time computer opens (in case database changed)
+            // Reload suggestions every time computer opens
             LoadPersonSuggestions();
             LoadVehicleSuggestions();
 
@@ -420,11 +646,14 @@ namespace PersistentWorld.Computer
             NativeFunction.Natives.DISPLAY_HUD(false);
             NativeFunction.Natives.DISPLAY_RADAR(false);
 
-            // Disable specific problematic controls
-            NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 303, true); // B button (backup menu)
-            NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 202, true); // B button
-            NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 168, true); // F6
-            NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 169, true); // F7
+            // Disable all controls
+            for (int i = 0; i < 500; i++)
+            {
+                NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, i, true);
+            }
+
+            // Freeze audio
+            FreezeAudio(true);
 
             _gameFrozen = true;
 
@@ -440,10 +669,25 @@ namespace PersistentWorld.Computer
                     NativeFunction.Natives.FREEZE_ENTITY_POSITION(Game.LocalPlayer.Character, true);
                     NativeFunction.Natives.SET_PLAYER_CONTROL(Game.LocalPlayer, false, 0);
 
-                    NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 303, true);
-                    NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 202, true);
-                    NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 168, true);
-                    NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, 169, true);
+                    // Re-disable all controls
+                    for (int i = 0; i < 500; i++)
+                    {
+                        NativeFunction.Natives.DISABLE_CONTROL_ACTION(0, i, true);
+                    }
+
+                    // Keep the suspect frozen if there is one
+                    if (_currentSuspect != null && _currentSuspect.Exists())
+                    {
+                        NativeFunction.Natives.FREEZE_ENTITY_POSITION(_currentSuspect, true);
+                        _currentSuspect.BlockPermanentEvents = true;
+                        _currentSuspect.KeepTasks = true;
+                    }
+
+                    // Keep the suspect vehicle frozen
+                    if (_currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
+                    {
+                        NativeFunction.Natives.FREEZE_ENTITY_POSITION(_currentSuspectVehicle, true);
+                    }
                 }
 
                 HandleInput();
@@ -457,7 +701,6 @@ namespace PersistentWorld.Computer
                 if (debugCounter >= 60)
                 {
                     debugCounter = 0;
-                    Game.LogTrivial($"[Computer] Current mode: {_currentSearchMode}, Person suggestions: {_personSuggestions.Count}, Vehicle suggestions: {_vehicleSuggestions.Count}");
                 }
 
                 if ((DateTime.Now - _lastCursorBlink).TotalMilliseconds > 500)
@@ -486,10 +729,19 @@ namespace PersistentWorld.Computer
             _selectedResultIndex = -1;
             _lastPersonResults = null;
             _currentSelectedPerson = null;
+            _currentVehicle = null;
             _selectedTicketIndex = 0;
             _ticketMenuScrollOffset = 0;
             _citationLocation.Clear();
             _showingArrests = false;
+
+            // Reset vehicle selection
+            _availableVehicles.Clear();
+            _selectedVehicle = null;
+            _vehicleSearchInput.Clear();
+            _vehicleSuggestions.Clear();
+            _selectedVehicleSuggestionIndex = -1;
+            _showVehicleSuggestions = false;
         }
 
         private void UpdateSuggestions()
@@ -503,7 +755,7 @@ namespace PersistentWorld.Computer
                 if (input.Length >= 1)
                 {
                     // Search vehicles from database suggestions
-                    foreach (var vehicle in _vehicleSuggestions)
+                    foreach (var vehicle in _vehicleSuggestionsList)
                     {
                         if (vehicle.LicensePlate.Contains(input) ||
                             vehicle.Model.ToUpper().Contains(input) ||
@@ -516,7 +768,7 @@ namespace PersistentWorld.Computer
                 else
                 {
                     // Show some recent/sample vehicles when no input
-                    foreach (var vehicle in _vehicleSuggestions.Take(10))
+                    foreach (var vehicle in _vehicleSuggestionsList.Take(10))
                     {
                         _quickSuggestions.Add(vehicle.DisplayName);
                     }
@@ -588,14 +840,97 @@ namespace PersistentWorld.Computer
             }
         }
 
+        private void UpdateVehicleSuggestions()
+        {
+            _vehicleSuggestions.Clear();
+
+            string input = _vehicleSearchInput.ToString().ToUpper();
+
+            // Always show owner's vehicle first if available
+            if (_currentSelectedPerson != null && string.IsNullOrEmpty(input))
+            {
+                string firstName = _currentSelectedPerson["first_name"].ToString();
+                string lastName = _currentSelectedPerson["last_name"].ToString();
+                string ownerName = $"{firstName} {lastName}";
+
+                // Find vehicles owned by this person
+                var ownerVehicles = _vehicleSuggestionsList.Where(v => v.OwnerName.Equals(ownerName, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                foreach (var vehicle in ownerVehicles)
+                {
+                    _vehicleSuggestions.Add($"→ {vehicle.DisplayName} (OWNER)");
+                }
+            }
+
+            // Add matching vehicles based on search input
+            if (input.Length >= 1)
+            {
+                foreach (var vehicle in _vehicleSuggestionsList)
+                {
+                    if (vehicle.LicensePlate.Contains(input) ||
+                        vehicle.Model.ToUpper().Contains(input) ||
+                        vehicle.OwnerName.ToUpper().Contains(input))
+                    {
+                        string displayName = vehicle.DisplayName;
+                        if (!_vehicleSuggestions.Contains(displayName) && !_vehicleSuggestions.Contains($"→ {displayName} (OWNER)"))
+                        {
+                            _vehicleSuggestions.Add(displayName);
+                        }
+                    }
+                }
+            }
+            else if (string.IsNullOrEmpty(input) && _vehicleSuggestions.Count == 0)
+            {
+                // Show some recent vehicles when no input and no owner vehicles
+                foreach (var vehicle in _vehicleSuggestionsList.Take(10))
+                {
+                    _vehicleSuggestions.Add(vehicle.DisplayName);
+                }
+            }
+
+            // Remove duplicates and limit
+            _vehicleSuggestions = _vehicleSuggestions.Distinct().Take(10).ToList();
+
+            // Show suggestions if we have any
+            _showVehicleSuggestions = _vehicleSuggestions.Count > 0;
+
+            if (_showVehicleSuggestions)
+            {
+                if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                    _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
+                if (_selectedVehicleSuggestionIndex < 0)
+                    _selectedVehicleSuggestionIndex = 0;
+            }
+            else
+            {
+                _selectedVehicleSuggestionIndex = -1;
+            }
+        }
+
         private void HandleInput()
         {
             if ((DateTime.Now - _lastKeyPress).TotalMilliseconds < 100)
                 return;
 
+            // ONLY ESCAPE closes the computer
             if (Game.IsKeyDown(Keys.Escape))
             {
                 if (_currentScreen == ScreenMode.TicketMenu)
+                {
+                    _currentScreen = ScreenMode.Search;
+                    _lastKeyPress = DateTime.Now;
+                }
+                else if (_currentScreen == ScreenMode.VehicleSelection)
+                {
+                    _currentScreen = ScreenMode.TicketMenu;
+                    _lastKeyPress = DateTime.Now;
+                }
+                else if (_currentScreen == ScreenMode.PersonDetails)
+                {
+                    _currentScreen = ScreenMode.Search;
+                    _lastKeyPress = DateTime.Now;
+                }
+                else if (_currentScreen == ScreenMode.VehicleDetails)
                 {
                     _currentScreen = ScreenMode.Search;
                     _lastKeyPress = DateTime.Now;
@@ -615,6 +950,93 @@ namespace PersistentWorld.Computer
             {
                 HandleTicketMenuInput();
             }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                HandleVehicleSelectionInput();
+            }
+            else if (_currentScreen == ScreenMode.PersonDetails)
+            {
+                HandlePersonDetailsInput();
+            }
+            else if (_currentScreen == ScreenMode.VehicleDetails)
+            {
+                HandleVehicleDetailsInput();
+            }
+        }
+
+        private void HandlePersonDetailsInput()
+        {
+            // F6 to issue ticket (keyboard)
+            if (Game.IsKeyDown(Keys.F6))
+            {
+                OpenTicketMenu();
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+
+            // Back to search
+            if (Game.IsKeyDown(Keys.Back) || Game.IsKeyDown(Keys.Escape))
+            {
+                _currentScreen = ScreenMode.Search;
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+        }
+
+        private void HandleVehicleDetailsInput()
+        {
+            // F6 to issue ticket (keyboard)
+            if (Game.IsKeyDown(Keys.F6))
+            {
+                if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                {
+                    int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                    string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                    string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                    if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                    {
+                        var personResults = _database.LookupByName(firstName, lastName);
+                        if (personResults != null && personResults.Count > 0)
+                        {
+                            _lastPersonResults = personResults;
+                            _selectedResultIndex = 0;
+                            _currentSelectedPerson = personResults[0];
+                            OpenTicketMenu();
+                        }
+                    }
+                }
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+
+            // Go to owner lookup
+            if (Game.IsKeyDown(Keys.Enter) && _currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+            {
+                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                {
+                    _currentSearchMode = SearchMode.Person;
+                    _personFirstNameInput.Clear();
+                    _personFirstNameInput.Append(firstName);
+                    _personLastNameInput.Clear();
+                    _personLastNameInput.Append(lastName);
+                    PerformSearch();
+                }
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+
+            // Back to search
+            if (Game.IsKeyDown(Keys.Back) || Game.IsKeyDown(Keys.Escape))
+            {
+                _currentScreen = ScreenMode.Search;
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
         }
 
         private void HandleControllerInput()
@@ -622,45 +1044,196 @@ namespace PersistentWorld.Computer
             if ((DateTime.Now - _lastControllerInput).TotalMilliseconds < 150)
                 return;
 
-            bool dpadDown = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 187) == 1;
-            bool dpadUp = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 188) == 1;
-            bool dpadLeft = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 189) == 1;
-            bool dpadRight = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 190) == 1;
-            bool aButton = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 201) == 1;
-            bool bButton = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 202) == 1;
-            bool xButton = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 203) == 1;
-            bool yButton = NativeFunction.Natives.IS_CONTROL_PRESSED<int>(0, 204) == 1;
+            bool dpadDown = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 187) == 1;
+            bool dpadUp = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 188) == 1;
+            bool dpadLeft = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 189) == 1;
+            bool dpadRight = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 190) == 1;
+            bool aButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 201) == 1;
+            bool bButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 202) == 1;
+            bool xButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 203) == 1;
+            bool yButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 204) == 1;
+            bool leftBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 205) == 1;
+            bool rightBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 206) == 1;
 
+            // B button = Back/Cancel
             if (bButton)
             {
                 if (_currentScreen == ScreenMode.TicketMenu)
                 {
-                    _currentScreen = ScreenMode.Search;
-                    _lastControllerInput = DateTime.Now;
+                    if (_citationLocation.Length > 0)
+                    {
+                        _citationLocation.Remove(_citationLocation.Length - 1, 1);
+                    }
+                    else
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
                 }
-                else
+                else if (_currentScreen == ScreenMode.VehicleSelection)
                 {
-                    Close();
-                    _lastControllerInput = DateTime.Now;
+                    if (_vehicleSearchInput.Length > 0)
+                    {
+                        _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
+                        UpdateVehicleSuggestions();
+                    }
+                    else
+                    {
+                        _currentScreen = ScreenMode.TicketMenu;
+                    }
                 }
+                else if (_currentScreen == ScreenMode.PersonDetails || _currentScreen == ScreenMode.VehicleDetails)
+                {
+                    _currentScreen = ScreenMode.Search;
+                }
+                else if (_currentScreen != ScreenMode.Search)
+                {
+                    _currentScreen = ScreenMode.Search;
+                }
+                _lastControllerInput = DateTime.Now;
                 return;
             }
 
-            if (_currentScreen == ScreenMode.Search)
+            // Right Bumper = Switch Mode / Switch between citations and arrests
+            if (rightBumper)
             {
-                // FIRST: Field switching for Person mode
-                if (_currentSearchMode == SearchMode.Person)
+                if (_currentScreen == ScreenMode.Search)
                 {
-                    if (dpadUp || dpadDown)
+                    SwitchMode();
+                }
+                else if (_currentScreen == ScreenMode.TicketMenu)
+                {
+                    _showingArrests = !_showingArrests;
+                    _selectedTicketIndex = 0;
+                    _ticketMenuScrollOffset = 0;
+                }
+                _lastControllerInput = DateTime.Now;
+                return;
+            }
+
+            // X button = View Owner
+            if (xButton)
+            {
+                if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                {
+                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                     {
-                        _activePersonField = (_activePersonField == PersonField.FirstName) ?
-                            PersonField.LastName : PersonField.FirstName;
-                        _lastControllerInput = DateTime.Now;
-                        return;
+                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                        if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                        {
+                            _currentSearchMode = SearchMode.Person;
+                            _personFirstNameInput.Clear();
+                            _personFirstNameInput.Append(firstName);
+                            _personLastNameInput.Clear();
+                            _personLastNameInput.Append(lastName);
+                            PerformSearch();
+                        }
                     }
                 }
+                _lastControllerInput = DateTime.Now;
+                return;
+            }
 
-                // THEN: Handle other navigation
+            // Y button = Issue Ticket
+            if (yButton)
+            {
+                if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
+                {
+                    OpenTicketMenu();
+                }
+                else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                {
+                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                    {
+                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                        if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                        {
+                            var personResults = _database.LookupByName(firstName, lastName);
+                            if (personResults != null && personResults.Count > 0)
+                            {
+                                _lastPersonResults = personResults;
+                                _selectedResultIndex = 0;
+                                _currentSelectedPerson = personResults[0];
+                                OpenTicketMenu();
+                            }
+                        }
+                    }
+                }
+                _lastControllerInput = DateTime.Now;
+                return;
+            }
+
+            // A button = Select / Search / Next
+            if (aButton)
+            {
+                if (_currentScreen == ScreenMode.Search)
+                {
+                    if (_showSuggestions && _selectedSuggestionIndex >= 0)
+                    {
+                        SelectSuggestion();
+                    }
+                    else
+                    {
+                        PerformSearch();
+                    }
+                }
+                else if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
+                {
+                    OpenTicketMenu();
+                }
+                else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                {
+                    // Go to owner lookup
+                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                    {
+                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                        if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                        {
+                            _currentSearchMode = SearchMode.Person;
+                            _personFirstNameInput.Clear();
+                            _personFirstNameInput.Append(firstName);
+                            _personLastNameInput.Clear();
+                            _personLastNameInput.Append(lastName);
+                            PerformSearch();
+                        }
+                    }
+                }
+                else if (_currentScreen == ScreenMode.TicketMenu)
+                {
+                    OpenVehicleSelection();
+                }
+                else if (_currentScreen == ScreenMode.VehicleSelection)
+                {
+                    if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                    {
+                        SelectVehicleSuggestion();
+                    }
+                }
+                _lastControllerInput = DateTime.Now;
+                return;
+            }
+
+            // D-Pad navigation
+            if (_currentScreen == ScreenMode.Search)
+            {
+                // Field switching for Person mode
+                if (_currentSearchMode == SearchMode.Person && (dpadLeft || dpadRight))
+                {
+                    _activePersonField = (_activePersonField == PersonField.FirstName) ?
+                        PersonField.LastName : PersonField.FirstName;
+                    _lastControllerInput = DateTime.Now;
+                    return;
+                }
+
+                // Navigate suggestions or results
                 if (dpadUp)
                 {
                     if (_showSuggestions)
@@ -698,45 +1271,16 @@ namespace PersistentWorld.Computer
                     _lastControllerInput = DateTime.Now;
                     return;
                 }
-
-                if (aButton)
-                {
-                    if (_showSuggestions && _selectedSuggestionIndex >= 0)
-                    {
-                        SelectSuggestion();
-                    }
-                    else
-                    {
-                        PerformSearch();
-                    }
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (xButton)
-                {
-                    SwitchMode();
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (dpadLeft)
-                {
-                    HandleBackspace();
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
             }
             else if (_currentScreen == ScreenMode.TicketMenu)
             {
                 if (dpadUp)
                 {
                     _selectedTicketIndex--;
+                    List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
+
                     if (_selectedTicketIndex < 0)
-                    {
-                        List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
                         _selectedTicketIndex = currentList.Count - 1;
-                    }
 
                     if (_selectedTicketIndex < _ticketMenuScrollOffset)
                         _ticketMenuScrollOffset = _selectedTicketIndex;
@@ -749,6 +1293,7 @@ namespace PersistentWorld.Computer
                 {
                     _selectedTicketIndex++;
                     List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
+
                     if (_selectedTicketIndex >= currentList.Count)
                         _selectedTicketIndex = 0;
 
@@ -758,32 +1303,28 @@ namespace PersistentWorld.Computer
                     _lastControllerInput = DateTime.Now;
                     return;
                 }
-
-                if (aButton)
+            }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                if (dpadUp)
                 {
-                    IssueSelectedTicket();
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (xButton)
-                {
-                    _showingArrests = !_showingArrests;
-                    _selectedTicketIndex = 0;
-                    _ticketMenuScrollOffset = 0;
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (bButton)
-                {
-                    if (_citationLocation.Length > 0)
+                    if (_showVehicleSuggestions)
                     {
-                        _citationLocation.Remove(_citationLocation.Length - 1, 1);
+                        _selectedVehicleSuggestionIndex--;
+                        if (_selectedVehicleSuggestionIndex < 0)
+                            _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
                     }
-                    else
+                    _lastControllerInput = DateTime.Now;
+                    return;
+                }
+
+                if (dpadDown)
+                {
+                    if (_showVehicleSuggestions)
                     {
-                        _currentScreen = ScreenMode.Search;
+                        _selectedVehicleSuggestionIndex++;
+                        if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                            _selectedVehicleSuggestionIndex = 0;
                     }
                     _lastControllerInput = DateTime.Now;
                     return;
@@ -880,6 +1421,7 @@ namespace PersistentWorld.Computer
                 }
             }
 
+            // BACKSPACE now ONLY deletes characters
             if (Game.IsKeyDown(Keys.Back))
             {
                 HandleBackspace();
@@ -965,7 +1507,8 @@ namespace PersistentWorld.Computer
 
             if (Game.IsKeyDown(Keys.Enter))
             {
-                IssueSelectedTicket();
+                // Move to vehicle selection instead of issuing directly
+                OpenVehicleSelection();
                 _lastKeyPress = DateTime.Now;
                 return;
             }
@@ -1017,42 +1560,149 @@ namespace PersistentWorld.Computer
             }
         }
 
+        private void HandleVehicleSelectionInput()
+        {
+            if (Game.IsKeyDown(Keys.Enter))
+            {
+                if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                {
+                    SelectVehicleSuggestion();
+                }
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+
+            if (Game.IsKeyDown(Keys.Back))
+            {
+                if (_vehicleSearchInput.Length > 0)
+                {
+                    _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
+                    UpdateVehicleSuggestions();
+                }
+                else
+                {
+                    _currentScreen = ScreenMode.TicketMenu;
+                }
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+
+            if (_showVehicleSuggestions)
+            {
+                if (Game.IsKeyDown(Keys.Up))
+                {
+                    _selectedVehicleSuggestionIndex--;
+                    if (_selectedVehicleSuggestionIndex < 0)
+                        _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
+                    _lastKeyPress = DateTime.Now;
+                    return;
+                }
+                if (Game.IsKeyDown(Keys.Down))
+                {
+                    _selectedVehicleSuggestionIndex++;
+                    if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                        _selectedVehicleSuggestionIndex = 0;
+                    _lastKeyPress = DateTime.Now;
+                    return;
+                }
+            }
+
+            // Letters A-Z
+            for (Keys key = Keys.A; key <= Keys.Z; key++)
+            {
+                if (Game.IsKeyDown(key))
+                {
+                    char c = (char)('A' + (key - Keys.A));
+                    if (_vehicleSearchInput.Length < 20)
+                        _vehicleSearchInput.Append(char.ToUpper(c));
+                    UpdateVehicleSuggestions();
+                    _lastKeyPress = DateTime.Now;
+                    return;
+                }
+            }
+
+            // Numbers
+            for (Keys key = Keys.D0; key <= Keys.D9; key++)
+            {
+                if (Game.IsKeyDown(key))
+                {
+                    char c = (char)('0' + (key - Keys.D0));
+                    if (_vehicleSearchInput.Length < 20)
+                        _vehicleSearchInput.Append(c);
+                    UpdateVehicleSuggestions();
+                    _lastKeyPress = DateTime.Now;
+                    return;
+                }
+            }
+
+            if (Game.IsKeyDown(Keys.Space))
+            {
+                if (_vehicleSearchInput.Length < 20)
+                    _vehicleSearchInput.Append(' ');
+                UpdateVehicleSuggestions();
+                _lastKeyPress = DateTime.Now;
+                return;
+            }
+        }
+
         private void HandleCharacter(char c)
         {
-            if (_currentSearchMode == SearchMode.Vehicle)
+            if (_currentScreen == ScreenMode.Search)
             {
-                if (_vehiclePlateInput.Length < 8)
-                    _vehiclePlateInput.Append(char.ToUpper(c));
-            }
-            else
-            {
-                StringBuilder target = _activePersonField == PersonField.FirstName ?
-                    _personFirstNameInput : _personLastNameInput;
-
-                if (target.Length < 20)
+                if (_currentSearchMode == SearchMode.Vehicle)
                 {
-                    if (target.Length == 0)
-                        target.Append(char.ToUpper(c));
+                    if (_vehiclePlateInput.Length < 8)
+                        _vehiclePlateInput.Append(char.ToUpper(c));
+                }
+                else
+                {
+                    StringBuilder target = _activePersonField == PersonField.FirstName ?
+                        _personFirstNameInput : _personLastNameInput;
+
+                    if (target.Length < 20)
+                    {
+                        if (target.Length == 0)
+                            target.Append(char.ToUpper(c));
+                        else
+                            target.Append(char.ToLower(c));
+                    }
+                }
+            }
+            else if (_currentScreen == ScreenMode.TicketMenu)
+            {
+                if (_citationLocation.Length < 30)
+                    _citationLocation.Append(c);
+            }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                if (_vehicleSearchInput.Length < 20)
+                {
+                    if (char.IsLetter(c))
+                        _vehicleSearchInput.Append(char.ToUpper(c));
                     else
-                        target.Append(char.ToLower(c));
+                        _vehicleSearchInput.Append(c);
+                    UpdateVehicleSuggestions();
                 }
             }
         }
 
         private void HandleBackspace()
         {
-            if (_currentSearchMode == SearchMode.Vehicle)
+            if (_currentScreen == ScreenMode.Search)
             {
-                if (_vehiclePlateInput.Length > 0)
-                    _vehiclePlateInput.Remove(_vehiclePlateInput.Length - 1, 1);
-            }
-            else
-            {
-                StringBuilder target = _activePersonField == PersonField.FirstName ?
-                    _personFirstNameInput : _personLastNameInput;
+                if (_currentSearchMode == SearchMode.Vehicle)
+                {
+                    if (_vehiclePlateInput.Length > 0)
+                        _vehiclePlateInput.Remove(_vehiclePlateInput.Length - 1, 1);
+                }
+                else
+                {
+                    StringBuilder target = _activePersonField == PersonField.FirstName ?
+                        _personFirstNameInput : _personLastNameInput;
 
-                if (target.Length > 0)
-                    target.Remove(target.Length - 1, 1);
+                    if (target.Length > 0)
+                        target.Remove(target.Length - 1, 1);
+                }
             }
         }
 
@@ -1096,6 +1746,36 @@ namespace PersistentWorld.Computer
             _selectedSuggestionIndex = -1;
         }
 
+        private void SelectVehicleSuggestion()
+        {
+            if (_selectedVehicleSuggestionIndex < 0 || _selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                return;
+
+            string selected = _vehicleSuggestions[_selectedVehicleSuggestionIndex];
+
+            // Remove the "→ " and " (OWNER)" markers if present
+            string cleanSelected = selected.Replace("→ ", "").Replace(" (OWNER)", "");
+
+            // Find the matching vehicle in the suggestions list
+            var matchingVehicle = _vehicleSuggestionsList.FirstOrDefault(v => v.DisplayName == cleanSelected);
+
+            if (matchingVehicle != null)
+            {
+                _selectedVehicle = new Dictionary<string, object>
+                {
+                    { "id", matchingVehicle.Id },
+                    { "license_plate", matchingVehicle.LicensePlate },
+                    { "vehicle_model", matchingVehicle.Model },
+                    { "owner_name", matchingVehicle.OwnerName }
+                };
+
+                Game.LogTrivial($"[Computer] Selected vehicle: {matchingVehicle.LicensePlate} (ID: {matchingVehicle.Id})");
+
+                // Now issue the ticket with the selected vehicle
+                IssueSelectedTicketWithVehicle();
+            }
+        }
+
         private void SwitchMode()
         {
             _currentSearchMode = _currentSearchMode == SearchMode.Vehicle ? SearchMode.Person : SearchMode.Vehicle;
@@ -1117,6 +1797,7 @@ namespace PersistentWorld.Computer
             _quickSuggestions.Clear();
             _showSuggestions = false;
             _selectedSuggestionIndex = -1;
+            _currentVehicle = null;
 
             if (_currentSearchMode == SearchMode.Vehicle)
             {
@@ -1132,6 +1813,8 @@ namespace PersistentWorld.Computer
 
                 if (result != null && result.Count > 0)
                 {
+                    _currentVehicle = result;
+
                     _leftColumnResults.Add($"=== VEHICLE RESULTS ===");
 
                     // Vehicle info
@@ -1149,7 +1832,7 @@ namespace PersistentWorld.Computer
                     if (result.ContainsKey("company_name") && result["company_name"] != null)
                         _leftColumnResults.Add($"Company: {result["company_name"]}");
 
-                    // NEW: Registration status
+                    // Registration status
                     if (result.ContainsKey("no_registration") && Convert.ToInt32(result["no_registration"]) == 1)
                     {
                         _leftColumnResults.Add($"~r~NO REGISTRATION");
@@ -1166,7 +1849,7 @@ namespace PersistentWorld.Computer
                         }
                     }
 
-                    // NEW: Insurance status
+                    // Insurance status
                     if (result.ContainsKey("no_insurance") && Convert.ToInt32(result["no_insurance"]) == 1)
                     {
                         _leftColumnResults.Add($"~r~NO INSURANCE");
@@ -1183,7 +1866,7 @@ namespace PersistentWorld.Computer
                         }
                     }
 
-                    // NEW: Stolen status
+                    // Stolen status
                     if (result.ContainsKey("is_stolen") && Convert.ToInt32(result["is_stolen"]) == 1)
                     {
                         string stolenReason = result.ContainsKey("stolen_reason") ? result["stolen_reason"].ToString() : "Unknown";
@@ -1191,7 +1874,7 @@ namespace PersistentWorld.Computer
                         _leftColumnResults.Add($"~r~Reason: {stolenReason}");
                     }
 
-                    // NEW: Impounded status
+                    // Impounded status
                     if (result.ContainsKey("is_impounded") && Convert.ToInt32(result["is_impounded"]) == 1)
                     {
                         string impoundReason = result.ContainsKey("impounded_reason") ? result["impounded_reason"].ToString() : "Unknown";
@@ -1199,6 +1882,28 @@ namespace PersistentWorld.Computer
                         _leftColumnResults.Add($"~r~*** IMPOUNDED ***");
                         _leftColumnResults.Add($"~r~Reason: {impoundReason}");
                         _leftColumnResults.Add($"~y~Location: {impoundLocation}");
+                    }
+
+                    // Owner information
+                    if (result.ContainsKey("owner_name") && result["owner_name"] != null)
+                    {
+                        _leftColumnResults.Add($"");
+                        _leftColumnResults.Add($"=== OWNER INFORMATION ===");
+                        _leftColumnResults.Add($"Name: {result["owner_name"]}");
+
+                        if (result.ContainsKey("home_address") && result["home_address"] != null)
+                            _leftColumnResults.Add($"Address: {result["home_address"]}");
+
+                        if (result.ContainsKey("license_status") && result["license_status"] != null)
+                        {
+                            string licenseStatus = result["license_status"].ToString();
+                            string statusColor = "~g~";
+                            if (licenseStatus.ToUpper() == "SUSPENDED") statusColor = "~y~";
+                            if (licenseStatus.ToUpper() == "REVOKED") statusColor = "~r~";
+                            if (licenseStatus.ToUpper() == "EXPIRED") statusColor = "~y~";
+
+                            _leftColumnResults.Add($"License: {statusColor}{licenseStatus}~w~");
+                        }
                     }
 
                     // Check if owner is wanted
@@ -1213,6 +1918,11 @@ namespace PersistentWorld.Computer
                     {
                         _leftColumnResults.Add($"~r~OWNER IS INCARCERATED");
                     }
+
+                    // Buttons for vehicle lookup
+                    _leftColumnResults.Add($"");
+                    _leftColumnResults.Add($"~g~[A/ENTER] View Owner Info");
+                    _leftColumnResults.Add($"~y~[Y/F6] Issue Ticket to Owner");
 
                     // Get person info if owner is a person
                     if (result.ContainsKey("ped_id") && result["ped_id"] != null && Convert.ToInt32(result["ped_id"]) > 0)
@@ -1232,6 +1942,9 @@ namespace PersistentWorld.Computer
                             }
                         }
                     }
+
+                    // Set current screen to VehicleDetails to enable button actions
+                    _currentScreen = ScreenMode.VehicleDetails;
                 }
                 else
                 {
@@ -1494,7 +2207,10 @@ namespace PersistentWorld.Computer
             }
 
             _leftColumnResults.Add($"");
-            _leftColumnResults.Add("~g~Press F6 to issue ticket");
+            _leftColumnResults.Add("~g~[A/ENTER/Y/F6] Issue Ticket");
+
+            // Set current screen to PersonDetails to enable button actions
+            _currentScreen = ScreenMode.PersonDetails;
 
             LoadCitationHistory(person);
 
@@ -1513,13 +2229,23 @@ namespace PersistentWorld.Computer
             _citationLocation.Clear();
             _showingArrests = false;
 
-            Game.DisplayNotification($"Select ticket for {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}");
+            Game.DisplayNotification($"Select charge for {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}");
         }
 
-        //=============================================================================
-        // FIXED: IssueSelectedTicket method - Using vehicle ID 1 as placeholder
-        //=============================================================================
-        private void IssueSelectedTicket()
+        private void OpenVehicleSelection()
+        {
+            if (_currentSelectedPerson == null) return;
+
+            _currentScreen = ScreenMode.VehicleSelection;
+            _vehicleSearchInput.Clear();
+            _selectedVehicle = null;
+            UpdateVehicleSuggestions();
+            _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count > 0 ? 0 : -1;
+
+            Game.DisplayNotification($"Select vehicle for {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}");
+        }
+
+        private void IssueSelectedTicketWithVehicle()
         {
             if (_currentSelectedPerson == null)
             {
@@ -1542,9 +2268,23 @@ namespace PersistentWorld.Computer
             int pedId = Convert.ToInt32(_currentSelectedPerson["id"]);
             string personName = $"{_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}";
 
-            // Use vehicle ID 1 as placeholder for citations without a vehicle
-            // Vehicle ID 1 is STARK01 and always exists in the database
-            _database.AddTicket(pedId, 1, ticket.Description, ticket.Fine, location);
+            // Get vehicle ID (use 1 as fallback if no vehicle selected)
+            int vehicleId = 1;
+            string vehicleInfo = "No vehicle";
+
+            if (_selectedVehicle != null && _selectedVehicle.ContainsKey("id"))
+            {
+                vehicleId = Convert.ToInt32(_selectedVehicle["id"]);
+                vehicleInfo = _selectedVehicle["license_plate"].ToString();
+                Game.LogTrivial($"[Computer] Issuing ticket with vehicle: {vehicleInfo} (ID: {vehicleId})");
+            }
+            else
+            {
+                Game.LogTrivial($"[Computer] Issuing ticket with default vehicle ID 1");
+            }
+
+            // Add the ticket to database
+            _database.AddTicket(pedId, vehicleId, ticket.Description, ticket.Fine, location);
 
             if (ticket.IsArrestable)
             {
@@ -1555,12 +2295,16 @@ namespace PersistentWorld.Computer
             }
             else
             {
-                Game.DisplayNotification($"~g~Citation~w~ issued to {personName} - ${ticket.Fine}");
-                Game.LogTrivial($"[CITATION] {personName} cited for {ticket.Description}, ${ticket.Fine}");
+                string vehicleMsg = vehicleId != 1 ? $" (Vehicle: {vehicleInfo})" : "";
+                Game.DisplayNotification($"~g~Citation~w~ issued to {personName} - ${ticket.Fine}{vehicleMsg}");
+                Game.LogTrivial($"[CITATION] {personName} cited for {ticket.Description}, ${ticket.Fine} - Vehicle: {vehicleInfo}");
             }
 
+            // Return to search screen
             _currentScreen = ScreenMode.Search;
             _activePersonField = PersonField.FirstName;
+
+            // Refresh the search results
             PerformSearch();
         }
 
@@ -1571,17 +2315,124 @@ namespace PersistentWorld.Computer
             NativeFunction.Natives.DRAW_RECT(centerX, 0.5f, 0.7f, 0.85f, 0, 0, 0, 220);
             NativeFunction.Natives.DRAW_RECT(centerX, 0.1f, 0.7f, 0.05f, 0, 0, 100, 255);
 
-            string headerText = _currentScreen == ScreenMode.TicketMenu ? "SELECT CHARGE" : "PERSISTENT WORLD MDT";
+            string headerText = "";
+            if (_currentScreen == ScreenMode.TicketMenu)
+                headerText = "SELECT CHARGE";
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+                headerText = "SELECT VEHICLE";
+            else if (_currentScreen == ScreenMode.PersonDetails)
+                headerText = "PERSON DETAILS";
+            else if (_currentScreen == ScreenMode.VehicleDetails)
+                headerText = "VEHICLE DETAILS";
+            else
+                headerText = "PERSISTENT WORLD MDT";
+
             DrawText(centerX, 0.09f, headerText, 1.0f, 255, 255, 255, 255, true);
 
             if (_currentScreen == ScreenMode.TicketMenu)
             {
                 DrawTicketMenu(centerX);
             }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                DrawVehicleSelection(centerX);
+            }
+            else if (_currentScreen == ScreenMode.PersonDetails || _currentScreen == ScreenMode.VehicleDetails)
+            {
+                DrawDetailsScreen(centerX);
+            }
             else
             {
                 DrawSearchScreen(centerX);
             }
+        }
+
+        private void DrawDetailsScreen(float centerX)
+        {
+            float leftColX = centerX - 0.3f;
+            float rightColX = centerX + 0.05f;
+            float resultsStartY = 0.18f;
+
+            if (_leftColumnResults.Count > 0)
+            {
+                float yPos = resultsStartY;
+                foreach (string line in _leftColumnResults)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        yPos += 0.01f;
+                        continue;
+                    }
+
+                    int r = 255, g = 255, b = 255;
+                    string displayLine = line;
+
+                    if (line.StartsWith("~r~"))
+                    {
+                        r = 255; g = 0; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+                    else if (line.StartsWith("~g~"))
+                    {
+                        r = 0; g = 255; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+                    else if (line.StartsWith("~y~"))
+                    {
+                        r = 255; g = 255; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+
+                    DrawText(leftColX, yPos, displayLine, 0.4f, r, g, b, 255, false);
+                    yPos += 0.03f;
+
+                    if (yPos > 0.8f) break;
+                }
+            }
+
+            if (_rightColumnResults.Count > 0)
+            {
+                float yPos = resultsStartY;
+                foreach (string line in _rightColumnResults)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        yPos += 0.01f;
+                        continue;
+                    }
+
+                    int r = 255, g = 255, b = 255;
+                    string displayLine = line;
+
+                    if (line.StartsWith("~r~"))
+                    {
+                        r = 255; g = 0; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+                    else if (line.StartsWith("~g~"))
+                    {
+                        r = 0; g = 255; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+                    else if (line.StartsWith("~y~"))
+                    {
+                        r = 255; g = 255; b = 0;
+                        displayLine = line.Substring(3);
+                    }
+
+                    DrawText(rightColX, yPos, displayLine, 0.4f, r, g, b, 255, false);
+                    yPos += 0.03f;
+
+                    if (yPos > 0.8f) break;
+                }
+            }
+
+            float footerY = 0.88f;
+            string footerText = "B Back | Y/F6 Ticket";
+            if (_currentScreen == ScreenMode.VehicleDetails)
+                footerText = "X/A View Owner | Y/F6 Ticket | B Back";
+
+            DrawText(centerX, footerY, footerText, 0.35f, 200, 200, 200, 255, true);
         }
 
         private void DrawSearchScreen(float centerX)
@@ -1808,8 +2659,67 @@ namespace PersistentWorld.Computer
                 DrawText(centerX - 0.28f, yPos, "   ↓ More ↓", 0.35f, 150, 150, 150, 255, false);
             }
 
+            // Show next step hint
+            DrawText(centerX - 0.28f, yPos + 0.03f, "A/ENTER to select vehicle", 0.35f, 0, 255, 0, 255, false);
+
             float footerY = 0.88f;
-            DrawText(centerX, footerY, "↑↓/DPad Navigate | X/TAB Switch | A/ENTER Issue | B Back | Type Location", 0.35f, 200, 200, 200, 255, true);
+            DrawText(centerX, footerY, "↑↓/DPad Navigate | X/TAB Switch | A/ENTER Next | B Back | Type Location", 0.35f, 200, 200, 200, 255, true);
+        }
+
+        private void DrawVehicleSelection(float centerX)
+        {
+            float yPos = 0.18f;
+
+            if (_currentSelectedPerson != null)
+            {
+                DrawText(centerX - 0.3f, yPos, $"Select vehicle for: {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}", 0.5f, 255, 255, 0, 255, false);
+                yPos += 0.05f;
+            }
+
+            DrawText(centerX - 0.3f, yPos, "Search:", 0.5f, 200, 200, 200, 255, false);
+            string searchDisplay = _vehicleSearchInput.ToString();
+            if (_cursorVisible)
+                searchDisplay += "_";
+            else
+                searchDisplay += " ";
+            DrawText(centerX, yPos, searchDisplay, 0.5f, 0, 255, 255, 255, false);
+            yPos += 0.05f;
+
+            // Draw vehicle suggestions
+            if (_showVehicleSuggestions)
+            {
+                DrawText(centerX - 0.3f, yPos, "Vehicles:", 0.4f, 255, 255, 0, 255, false);
+                yPos += 0.04f;
+
+                for (int i = 0; i < _vehicleSuggestions.Count && i < 8; i++)
+                {
+                    string prefix = (i == _selectedVehicleSuggestionIndex) ? "→ " : "  ";
+                    int r = (i == _selectedVehicleSuggestionIndex) ? 0 : 255;
+                    int g = (i == _selectedVehicleSuggestionIndex) ? 255 : 255;
+                    int b = (i == _selectedVehicleSuggestionIndex) ? 0 : 255;
+
+                    string suggestion = _vehicleSuggestions[i];
+                    if (suggestion.Length > 35)
+                        suggestion = suggestion.Substring(0, 32) + "...";
+
+                    DrawText(centerX - 0.28f, yPos, prefix + suggestion, 0.4f, r, g, b, 255, false);
+                    yPos += 0.03f;
+                }
+            }
+            else
+            {
+                DrawText(centerX - 0.3f, yPos, "No vehicles found", 0.4f, 255, 0, 0, 255, false);
+                yPos += 0.04f;
+            }
+
+            // Show selection hint
+            if (_selectedVehicle != null)
+            {
+                DrawText(centerX - 0.28f, yPos + 0.03f, $"Selected: {_selectedVehicle["license_plate"]}", 0.35f, 0, 255, 0, 255, false);
+            }
+
+            float footerY = 0.88f;
+            DrawText(centerX, footerY, "↑↓/DPad Navigate | A/ENTER Select | B Back | Type to search", 0.35f, 200, 200, 200, 255, true);
         }
 
         private void DrawText(float x, float y, string text, float scale, int r, int g, int b, int a, bool centered)
@@ -1829,6 +2739,23 @@ namespace PersistentWorld.Computer
         {
             _isOpen = false;
             _gameFrozen = false;
+
+            // Unfreeze the suspect if there was one
+            if (_currentSuspect != null && _currentSuspect.Exists())
+            {
+                NativeFunction.Natives.FREEZE_ENTITY_POSITION(_currentSuspect, false);
+                _currentSuspect.BlockPermanentEvents = false;
+                _currentSuspect.KeepTasks = false;
+            }
+
+            // Unfreeze the suspect vehicle
+            if (_currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
+            {
+                NativeFunction.Natives.FREEZE_ENTITY_POSITION(_currentSuspectVehicle, false);
+            }
+
+            // Unfreeze audio
+            FreezeAudio(false);
 
             Game.LocalPlayer.Character.IsInvincible = false;
             Game.LocalPlayer.Character.KeepTasks = false;

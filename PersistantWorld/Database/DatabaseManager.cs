@@ -36,7 +36,7 @@ namespace PersistentWorld.Database
         {
             _connection.Open();
 
-            // Create tables with updated schema
+            // Create tables with updated schema (peds table now has NO vehicle columns)
             string[] createTableQueries = {
                 @"
                 CREATE TABLE IF NOT EXISTS companies (
@@ -47,7 +47,7 @@ namespace PersistentWorld.Database
                     phone_number TEXT
                 )",
                 
-                // PEDS TABLE
+                // PEDS TABLE - NO VEHICLE COLUMNS
                 @"
                 CREATE TABLE IF NOT EXISTS peds (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,16 +63,6 @@ namespace PersistentWorld.Database
                     home_coord_x REAL,
                     home_coord_y REAL,
                     home_coord_z REAL,
-                    
-                    -- VEHICLE FIELDS
-                    has_vehicle INTEGER DEFAULT 0,
-                    vehicle_model TEXT,
-                    license_plate TEXT,
-                    color_primary TEXT,
-                    color_secondary TEXT,
-                    car_spawn_x REAL,
-                    car_spawn_y REAL,
-                    car_spawn_z REAL,
                     
                     -- SPAWN PERCENTAGES
                     is_home_percent INTEGER DEFAULT 30,
@@ -97,7 +87,7 @@ namespace PersistentWorld.Database
                     is_active INTEGER DEFAULT 1
                 )",
                 
-                // VEHICLES TABLE - UPDATED with new fields
+                // VEHICLES TABLE
                 @"
                 CREATE TABLE IF NOT EXISTS vehicles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +99,7 @@ namespace PersistentWorld.Database
                     owner_type TEXT NOT NULL,
                     owner_id INTEGER NOT NULL,
                     
-                    -- NEW FIELDS
+                    -- VEHICLE STATUS FIELDS
                     registration_expiry TEXT DEFAULT '2026-12-01',
                     insurance_expiry TEXT DEFAULT '2026-12-01',
                     is_impounded INTEGER DEFAULT 0,
@@ -190,14 +180,6 @@ namespace PersistentWorld.Database
                     "ALTER TABLE peds ADD COLUMN home_coord_x REAL",
                     "ALTER TABLE peds ADD COLUMN home_coord_y REAL",
                     "ALTER TABLE peds ADD COLUMN home_coord_z REAL",
-                    "ALTER TABLE peds ADD COLUMN has_vehicle INTEGER DEFAULT 0",
-                    "ALTER TABLE peds ADD COLUMN vehicle_model TEXT",
-                    "ALTER TABLE peds ADD COLUMN license_plate TEXT",
-                    "ALTER TABLE peds ADD COLUMN color_primary TEXT",
-                    "ALTER TABLE peds ADD COLUMN color_secondary TEXT",
-                    "ALTER TABLE peds ADD COLUMN car_spawn_x REAL",
-                    "ALTER TABLE peds ADD COLUMN car_spawn_y REAL",
-                    "ALTER TABLE peds ADD COLUMN car_spawn_z REAL",
                     "ALTER TABLE peds ADD COLUMN is_home_percent INTEGER DEFAULT 30",
                     "ALTER TABLE peds ADD COLUMN is_driving_percent INTEGER DEFAULT 30",
                     "ALTER TABLE peds ADD COLUMN in_world_percent INTEGER DEFAULT 40",
@@ -239,10 +221,16 @@ namespace PersistentWorld.Database
                             command.ExecuteNonQuery();
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Game.LogTrivial($"[Database] Note: {ex.Message} (this is normal if column already exists)");
+                    }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[Database] Error in alter queries: {ex.Message}");
+            }
 
             // Migrate old data if needed
             MigrateToUnifiedVehicles();
@@ -377,7 +365,7 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
-        // LOOKUP METHODS
+        // LOOKUP METHODS - UPDATED TO USE JOIN FOR VEHICLES
         //=============================================================================
         public List<Dictionary<string, object>> LookupByName(string firstName, string lastName)
         {
@@ -402,14 +390,6 @@ namespace PersistentWorld.Database
                     p.home_coord_x,
                     p.home_coord_y,
                     p.home_coord_z,
-                    p.has_vehicle,
-                    p.vehicle_model,
-                    p.license_plate,
-                    p.color_primary,
-                    p.color_secondary,
-                    p.car_spawn_x,
-                    p.car_spawn_y,
-                    p.car_spawn_z,
                     p.is_home_percent,
                     p.is_driving_percent,
                     p.in_world_percent,
@@ -424,20 +404,25 @@ namespace PersistentWorld.Database
                     p.is_active,
                     e.company_id,
                     c.name as employer_name,
-                    e.job_title
+                    e.job_title,
+                    -- Get ALL vehicles for this person in a single query
+                    GROUP_CONCAT(v.id || '|' || v.license_plate || '|' || v.vehicle_model || '|' || 
+                                v.color_primary || '|' || v.color_secondary || '|' || 
+                                v.registration_expiry || '|' || v.insurance_expiry || '|' ||
+                                v.is_impounded || '|' || v.is_stolen, ';') as vehicles_data
                 FROM peds p
                 LEFT JOIN employment e ON p.id = e.ped_id AND e.is_current = 1
                 LEFT JOIN companies c ON e.company_id = c.id
-                WHERE (@firstName = '' OR p.first_name LIKE @firstNamePattern)
-                AND (@lastName = '' OR p.last_name LIKE @lastNamePattern)
+                LEFT JOIN vehicles v ON v.owner_type = 'person' AND v.owner_id = p.id AND v.is_active = 1
+                WHERE (LENGTH(@firstName) = 0 OR p.first_name = @firstName)
+                AND (LENGTH(@lastName) = 0 OR p.last_name = @lastName)
+                GROUP BY p.id
                 ORDER BY p.last_name, p.first_name";
 
             using (var command = new SQLiteCommand(query, _connection))
             {
                 command.Parameters.AddWithValue("@firstName", firstName ?? "");
-                command.Parameters.AddWithValue("@firstNamePattern", (firstName ?? "") + "%");
                 command.Parameters.AddWithValue("@lastName", lastName ?? "");
-                command.Parameters.AddWithValue("@lastNamePattern", (lastName ?? "") + "%");
 
                 using (var reader = command.ExecuteReader())
                 {
@@ -458,10 +443,20 @@ namespace PersistentWorld.Database
                             }
                         }
 
-                        // Get vehicles owned by this person
+                        // Parse vehicles_data into owned_vehicles list
+                        if (person.ContainsKey("vehicles_data") && person["vehicles_data"] != null)
+                        {
+                            string vehiclesData = person["vehicles_data"].ToString();
+                            person["owned_vehicles"] = ParseVehiclesData(vehiclesData);
+                        }
+                        else
+                        {
+                            person["owned_vehicles"] = new List<Dictionary<string, object>>();
+                        }
+
+                        // Get ticket history (keep as separate query)
                         if (person.ContainsKey("id") && person["id"] != null)
                         {
-                            person["owned_vehicles"] = GetPersonVehicles(Convert.ToInt32(person["id"]));
                             person["ticket_history"] = GetPersonTickets(Convert.ToInt32(person["id"]));
                             person["incarceration_history"] = GetIncarcerationHistory(Convert.ToInt32(person["id"]));
                         }
@@ -472,6 +467,49 @@ namespace PersistentWorld.Database
             }
 
             return results;
+        }
+
+        private List<Dictionary<string, object>> ParseVehiclesData(string vehiclesData)
+        {
+            var vehicles = new List<Dictionary<string, object>>();
+
+            if (string.IsNullOrEmpty(vehiclesData))
+                return vehicles;
+
+            string[] vehicleStrings = vehiclesData.Split(';');
+
+            foreach (string vehicleString in vehicleStrings)
+            {
+                if (string.IsNullOrEmpty(vehicleString)) continue;
+
+                string[] parts = vehicleString.Split('|');
+                if (parts.Length >= 5)
+                {
+                    var vehicle = new Dictionary<string, object>();
+
+                    // Parse ID
+                    if (int.TryParse(parts[0], out int id))
+                        vehicle["id"] = id;
+
+                    vehicle["license_plate"] = parts[1];
+                    vehicle["vehicle_model"] = parts[2];
+                    vehicle["color_primary"] = parts[3];
+                    vehicle["color_secondary"] = parts[4];
+
+                    if (parts.Length > 5) vehicle["registration_expiry"] = parts[5];
+                    if (parts.Length > 6) vehicle["insurance_expiry"] = parts[6];
+
+                    if (parts.Length > 7 && int.TryParse(parts[7], out int impounded))
+                        vehicle["is_impounded"] = impounded;
+
+                    if (parts.Length > 8 && int.TryParse(parts[8], out int stolen))
+                        vehicle["is_stolen"] = stolen;
+
+                    vehicles.Add(vehicle);
+                }
+            }
+
+            return vehicles;
         }
 
         public Dictionary<string, object> LookupByPlate(string plate)
@@ -520,14 +558,6 @@ namespace PersistentWorld.Database
                     p.home_coord_x,
                     p.home_coord_y,
                     p.home_coord_z,
-                    p.has_vehicle,
-                    p.vehicle_model as ped_vehicle_model,
-                    p.license_plate as ped_license_plate,
-                    p.color_primary as ped_color_primary,
-                    p.color_secondary as ped_color_secondary,
-                    p.car_spawn_x,
-                    p.car_spawn_y,
-                    p.car_spawn_z,
                     p.is_home_percent,
                     p.is_driving_percent,
                     p.in_world_percent,
@@ -571,6 +601,7 @@ namespace PersistentWorld.Database
             return result;
         }
 
+        // NEW METHOD: Get vehicle by plate (simple version)
         public Dictionary<string, object> GetVehicleByPlate(string plate)
         {
             string query = "SELECT * FROM vehicles WHERE license_plate = @plate AND is_active = 1";
@@ -638,8 +669,12 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
-        // UPDATE VEHICLE MODEL METHOD
+        // VEHICLE MODEL UPDATE METHODS - UPDATED (NO MORE PEDS UPDATE)
         //=============================================================================
+
+        /// <summary>
+        /// Updates vehicle model in the database (vehicles table only)
+        /// </summary>
         public void UpdateVehicleModel(string licensePlate, string newModel)
         {
             try
@@ -678,10 +713,10 @@ namespace PersistentWorld.Database
             }
         }
 
-        //=============================================================================
-        // BATCH UPDATE VEHICLE MODELS
-        //=============================================================================
-        public void UpdateVehicleModels(Dictionary<string, string> plateToModelMap)
+        /// <summary>
+        /// Batch updates multiple vehicle models at once
+        /// </summary>
+        public void BatchUpdateVehicleModels(Dictionary<string, string> plateToModelMap)
         {
             try
             {
@@ -712,7 +747,9 @@ namespace PersistentWorld.Database
 
                             int rowsAffected = cmd.ExecuteNonQuery();
                             if (rowsAffected > 0)
+                            {
                                 updatedCount++;
+                            }
                         }
                     }
 
@@ -1051,13 +1088,6 @@ namespace PersistentWorld.Database
                     command.Parameters.AddWithValue("@date", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                     command.Parameters.AddWithValue("@notes", "");
 
-                    // Log the final parameter values
-                    Game.LogTrivial($"[TICKET DEBUG] Final parameters:");
-                    foreach (SQLiteParameter p in command.Parameters)
-                    {
-                        Game.LogTrivial($"[TICKET DEBUG]   {p.ParameterName} = '{p.Value}' (Type: {p.Value?.GetType().Name ?? "NULL"})");
-                    }
-
                     int rowsAffected = command.ExecuteNonQuery();
 
                     if (rowsAffected > 0)
@@ -1175,66 +1205,6 @@ namespace PersistentWorld.Database
             }
 
             return tickets;
-        }
-
-        //=============================================================================
-        // VEHICLE OWNERSHIP METHODS
-        //=============================================================================
-        private List<Dictionary<string, object>> GetPersonVehicles(int personId)
-        {
-            var vehicles = new List<Dictionary<string, object>>();
-
-            string query = @"
-                SELECT 
-                    id,
-                    license_plate,
-                    vehicle_model,
-                    color_primary,
-                    color_secondary,
-                    registered_state,
-                    registration_expiry,
-                    insurance_expiry,
-                    is_impounded,
-                    impounded_reason,
-                    impounded_date,
-                    impounded_location,
-                    is_stolen,
-                    stolen_reason,
-                    stolen_date,
-                    stolen_recovered_date,
-                    no_registration,
-                    no_insurance,
-                    notes
-                FROM vehicles 
-                WHERE owner_type = 'person' AND owner_id = @personId AND is_active = 1";
-
-            using (var command = new SQLiteCommand(query, _connection))
-            {
-                command.Parameters.AddWithValue("@personId", personId);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        var vehicle = new Dictionary<string, object>();
-                        for (int i = 0; i < reader.FieldCount; i++)
-                        {
-                            string columnName = reader.GetName(i);
-                            if (!reader.IsDBNull(i))
-                            {
-                                vehicle[columnName] = reader.GetValue(i);
-                            }
-                            else
-                            {
-                                vehicle[columnName] = null;
-                            }
-                        }
-                        vehicles.Add(vehicle);
-                    }
-                }
-            }
-
-            return vehicles;
         }
 
         //=============================================================================
@@ -1422,7 +1392,7 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
-        // STOP THE PED IMPORT
+        // STOP THE PED IMPORT - UPDATED (no vehicle fields in peds table)
         //=============================================================================
         public void ImportStopThePedPeds()
         {
@@ -1644,11 +1614,11 @@ namespace PersistentWorld.Database
                                     modelName = commonModels[_random.Next(commonModels.Length)];
                                 }
 
+                                // UPDATED: No vehicle fields in INSERT
                                 string insertQuery = @"
                                     INSERT INTO peds (
                                         first_name, last_name, model_name, gender, home_address,
                                         has_home, home_type,
-                                        has_vehicle,
                                         is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                                         license_number, license_status, license_reason, license_expiry, license_class,
                                         date_of_birth,
@@ -1658,7 +1628,6 @@ namespace PersistentWorld.Database
                                     ) VALUES (
                                         @firstName, @lastName, @modelName, @gender, @address,
                                         0, 'None',
-                                        0,
                                         30, 30, 40, 10,
                                         @licenseNumber, @licenseStatus, '', '2026-12-31', 'Class C',
                                         @dob,
@@ -1708,7 +1677,7 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
-        // SEED DATA
+        // SEED DATA - UPDATED (no vehicle fields in peds table)
         //=============================================================================
         public void SeedInitialData()
         {
@@ -1736,18 +1705,17 @@ namespace PersistentWorld.Database
                 }
             }
 
+            // UPDATED: No vehicle fields in peds INSERT
             string[] pedQueries = {
                 @"INSERT INTO peds (
                     first_name, last_name, model_name, gender, home_address,
                     has_home, home_type,
-                    has_vehicle,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
                     date_of_birth, is_wanted, wanted_reason, is_incarcerated
                 ) VALUES (
                     'Ned', 'Stark', 'player_zero', 'Male', '839 Gibraltar Ave, Vinewood Hills',
                     1, 'Exterior',
-                    1,
                     80, 10, 10, 0,
                     'S1234567', 'Valid', '', '2026-12-31', 'Class C',
                     '1960-01-15', 0, '', 0
@@ -1755,14 +1723,12 @@ namespace PersistentWorld.Database
                 @"INSERT INTO peds (
                     first_name, last_name, model_name, gender, home_address,
                     has_home, home_type,
-                    has_vehicle,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
                     date_of_birth, is_wanted, wanted_reason, is_incarcerated
                 ) VALUES (
                     'Tony', 'Soprano', 's_m_y_construct_01', 'Male', '742 Evergreen Terrace, Paleto Bay',
                     1, 'Exterior',
-                    1,
                     20, 60, 20, 30,
                     'S2345678', 'Suspended', 'Failure to appear', '2024-06-15', 'Class C',
                     '1965-08-22', 1, 'Grand theft auto, Assault', 0
@@ -1770,14 +1736,12 @@ namespace PersistentWorld.Database
                 @"INSERT INTO peds (
                     first_name, last_name, model_name, gender, home_address,
                     has_home, home_type,
-                    has_vehicle,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
                     date_of_birth, is_wanted, wanted_reason, is_incarcerated
                 ) VALUES (
                     'Carmela', 'Soprano', 's_f_y_shop_01', 'Female', '742 Evergreen Terrace, Paleto Bay',
                     1, 'Exterior',
-                    1,
                     40, 30, 30, 0,
                     'S3456789', 'Valid', '', '2025-03-20', 'Class C',
                     '1967-11-03', 0, '', 0
@@ -1792,29 +1756,51 @@ namespace PersistentWorld.Database
                 }
             }
 
+            // Get the IDs of the inserted peds
+            int nedId = 1, tonyId = 2, carmelaId = 3;
+
+            // Get actual IDs if possible
+            using (var cmd = new SQLiteCommand("SELECT id FROM peds WHERE first_name = 'Ned' AND last_name = 'Stark'", _connection))
+            {
+                var result = cmd.ExecuteScalar();
+                if (result != null) nedId = Convert.ToInt32(result);
+            }
+
+            using (var cmd = new SQLiteCommand("SELECT id FROM peds WHERE first_name = 'Tony' AND last_name = 'Soprano'", _connection))
+            {
+                var result = cmd.ExecuteScalar();
+                if (result != null) tonyId = Convert.ToInt32(result);
+            }
+
+            using (var cmd = new SQLiteCommand("SELECT id FROM peds WHERE first_name = 'Carmela' AND last_name = 'Soprano'", _connection))
+            {
+                var result = cmd.ExecuteScalar();
+                if (result != null) carmelaId = Convert.ToInt32(result);
+            }
+
             string[] vehicleQueries = {
-                @"INSERT INTO vehicles (
+                $@"INSERT INTO vehicles (
                     license_plate, vehicle_model, color_primary, color_secondary, 
                     registered_state, owner_type, owner_id, notes,
                     registration_expiry, insurance_expiry, is_stolen, no_registration, no_insurance
                 ) VALUES (
-                    'STARK01', 'emperor', 'Black', 'Silver', 'San Andreas', 'person', 1, 'Ned\'s personal car',
+                    'STARK01', 'emperor', 'Black', 'Silver', 'San Andreas', 'person', {nedId}, 'Ned\'s personal car',
                     '2026-12-01', '2026-12-01', 0, 0, 0
                 )",
-                @"INSERT INTO vehicles (
+                $@"INSERT INTO vehicles (
                     license_plate, vehicle_model, color_primary, color_secondary, 
                     registered_state, owner_type, owner_id, notes,
                     registration_expiry, insurance_expiry, is_stolen, no_registration, no_insurance
                 ) VALUES (
-                    'TONY01', 'bobcatxl', 'White', 'Tan', 'San Andreas', 'person', 2, 'Tony\'s personal truck',
+                    'TONY01', 'bobcatxl', 'White', 'Tan', 'San Andreas', 'person', {tonyId}, 'Tony\'s personal truck',
                     '2026-12-01', '2026-12-01', 0, 0, 0
                 )",
-                @"INSERT INTO vehicles (
+                $@"INSERT INTO vehicles (
                     license_plate, vehicle_model, color_primary, color_secondary, 
                     registered_state, owner_type, owner_id, notes,
                     registration_expiry, insurance_expiry, is_stolen, no_registration, no_insurance
                 ) VALUES (
-                    'CARM01', 'ingot', 'Gold', 'Brown', 'San Andreas', 'person', 3, 'Carmela\'s personal car',
+                    'CARM01', 'ingot', 'Gold', 'Brown', 'San Andreas', 'person', {carmelaId}, 'Carmela\'s personal car',
                     '2026-12-01', '2026-12-01', 0, 0, 0
                 )",
                 @"INSERT INTO vehicles (
@@ -1852,8 +1838,8 @@ namespace PersistentWorld.Database
             }
 
             string[] ticketQueries = {
-                "INSERT INTO tickets (ped_id, vehicle_id, offense, fine_amount, issuing_officer, location, date_issued) VALUES (2, 2, 'Speeding', 150, 'Officer Jenkins', 'Highway 1', '2024-01-15')",
-                "INSERT INTO tickets (ped_id, vehicle_id, offense, fine_amount, issuing_officer, location, date_issued) VALUES (2, 4, 'Expired Registration', 75, 'Officer Martinez', 'Downtown', '2024-02-03')"
+                $"INSERT INTO tickets (ped_id, vehicle_id, offense, fine_amount, issuing_officer, location, date_issued) VALUES ({tonyId}, 2, 'Speeding', 150, 'Officer Jenkins', 'Highway 1', '2024-01-15')",
+                $"INSERT INTO tickets (ped_id, vehicle_id, offense, fine_amount, issuing_officer, location, date_issued) VALUES ({tonyId}, 4, 'Expired Registration', 75, 'Officer Martinez', 'Downtown', '2024-02-03')"
             };
 
             foreach (string query in ticketQueries)
