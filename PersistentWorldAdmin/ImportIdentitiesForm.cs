@@ -172,7 +172,7 @@ namespace PersistentWorldAdmin
                 // Parse the JSON
                 var jsonObject = JObject.Parse(jsonContent);
 
-                // Find the array (it's under a weird key name)
+                // Find the array
                 JArray identitiesArray = null;
                 foreach (var property in jsonObject.Properties())
                 {
@@ -335,12 +335,11 @@ namespace PersistentWorldAdmin
                     else if (!identity.HasValidLicense)
                         licenseStatus = "NoLicense";
 
-                    // Insert into database
+                    // Insert into database - REMOVED ALL VEHICLE FIELDS
                     string insertQuery = @"
                         INSERT INTO peds (
                             first_name, last_name, model_name, gender, home_address,
                             has_home, home_type,
-                            has_vehicle,
                             is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                             license_number, license_status, license_reason, license_expiry, license_class,
                             date_of_birth,
@@ -350,7 +349,6 @@ namespace PersistentWorldAdmin
                         ) VALUES (
                             @firstName, @lastName, @modelName, @gender, @homeAddress,
                             0, 'None',
-                            0,
                             @homePct, @drivePct, @worldPct, 10,
                             @licenseNumber, @licenseStatus, '', '2026-12-31', 'Class C',
                             @dob,

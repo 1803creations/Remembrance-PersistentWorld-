@@ -25,17 +25,6 @@ namespace PersistentWorldAdmin
         private NumericUpDown numHomeZ;
         private Button btnGetHomeCoords;
 
-        // Vehicle / Car Spawn
-        private CheckBox chkHasVehicle;
-        private TextBox txtVehicleModel;
-        private TextBox txtLicensePlate;
-        private TextBox txtColorPrimary;
-        private TextBox txtColorSecondary;
-        private NumericUpDown numCarSpawnX;
-        private NumericUpDown numCarSpawnY;
-        private NumericUpDown numCarSpawnZ;
-        private Button btnGetCarSpawnCoords;
-
         // License Info
         private TextBox txtLicenseNumber;
         private ComboBox cmbLicenseStatus;
@@ -90,19 +79,17 @@ namespace PersistentWorldAdmin
                 numInWorldPercent.Value = 40;
                 numIsCarryingGunPercent.Value = 10;
 
-                // Default home/vehicle settings
+                // Default home settings
                 cmbHomeType.SelectedIndex = 0; // "None"
                 chkHasHome.Checked = false;
-                chkHasVehicle.Checked = false;
 
                 UpdateHomeFields();
-                UpdateVehicleFields();
             }
         }
 
         private void InitializeComponent()
         {
-            this.Size = new Size(900, 1200);
+            this.Size = new Size(900, 900);
             this.StartPosition = FormStartPosition.CenterParent;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -187,66 +174,7 @@ namespace PersistentWorldAdmin
             btnGetHomeCoords.Click += BtnGetHomeCoords_Click;
             btnGetHomeCoords.Enabled = false;
             Controls.Add(btnGetHomeCoords);
-            y += 40;
-
-            // === VEHICLE / CAR SPAWN ===
-            var lblVehicle = new Label { Text = "VEHICLE / CAR SPAWN", Location = new Point(20, y), Size = new Size(400, 20), Font = new Font("Arial", 10, FontStyle.Bold), ForeColor = Color.Purple };
-            Controls.Add(lblVehicle);
-            y += 25;
-
-            // Has Vehicle checkbox
-            chkHasVehicle = new CheckBox { Text = "Has Vehicle", Location = new Point(170, y), Size = new Size(300, 25) };
-            chkHasVehicle.CheckedChanged += (s, e) => UpdateVehicleFields();
-            Controls.Add(chkHasVehicle);
-            y += 35;
-
-            // Vehicle Model
-            AddLabel("Vehicle Model:", 20, y, labelWidth);
-            txtVehicleModel = AddTextBox(170, y, controlWidth);
-            txtVehicleModel.Enabled = false;
-            y += 35;
-
-            // License Plate
-            AddLabel("License Plate:", 20, y, labelWidth);
-            txtLicensePlate = AddTextBox(170, y, controlWidth);
-            txtLicensePlate.Enabled = false;
-            y += 35;
-
-            // Color Primary
-            AddLabel("Color Primary:", 20, y, labelWidth);
-            txtColorPrimary = AddTextBox(170, y, controlWidth);
-            txtColorPrimary.Enabled = false;
-            y += 35;
-
-            // Color Secondary
-            AddLabel("Color Secondary:", 20, y, labelWidth);
-            txtColorSecondary = AddTextBox(170, y, controlWidth);
-            txtColorSecondary.Enabled = false;
-            y += 35;
-
-            // Car Spawn Coordinates
-            AddLabel("Car Spawn Coords:", 20, y, labelWidth);
-
-            numCarSpawnX = new NumericUpDown { Location = new Point(170, y), Size = new Size(90, 25), Minimum = -5000, Maximum = 5000, DecimalPlaces = 2, Increment = (decimal)0.1 };
-            numCarSpawnX.Enabled = false;
-            Controls.Add(numCarSpawnX);
-
-            AddLabel("Y:", 270, y, 20);
-            numCarSpawnY = new NumericUpDown { Location = new Point(290, y), Size = new Size(90, 25), Minimum = -5000, Maximum = 5000, DecimalPlaces = 2, Increment = (decimal)0.1 };
-            numCarSpawnY.Enabled = false;
-            Controls.Add(numCarSpawnY);
-
-            AddLabel("Z:", 390, y, 20);
-            numCarSpawnZ = new NumericUpDown { Location = new Point(410, y), Size = new Size(90, 25), Minimum = -500, Maximum = 5000, DecimalPlaces = 2, Increment = (decimal)0.1 };
-            numCarSpawnZ.Enabled = false;
-            Controls.Add(numCarSpawnZ);
-
-            // Get Current Position button for car spawn
-            btnGetCarSpawnCoords = new Button { Text = "Get Current", Location = new Point(510, y), Size = new Size(100, 25) };
-            btnGetCarSpawnCoords.Click += BtnGetCarSpawnCoords_Click;
-            btnGetCarSpawnCoords.Enabled = false;
-            Controls.Add(btnGetCarSpawnCoords);
-            y += 40;
+            y += 45;
 
             // === LICENSE SECTION ===
             var lblLicense = new Label { Text = "LICENSE INFORMATION", Location = new Point(20, y), Size = new Size(400, 20), Font = new Font("Arial", 10, FontStyle.Bold), ForeColor = Color.Blue };
@@ -417,27 +345,7 @@ namespace PersistentWorldAdmin
             btnGetHomeCoords.Enabled = hasCoordinates;
         }
 
-        private void UpdateVehicleFields()
-        {
-            bool hasVehicle = chkHasVehicle.Checked;
-            txtVehicleModel.Enabled = hasVehicle;
-            txtLicensePlate.Enabled = hasVehicle;
-            txtColorPrimary.Enabled = hasVehicle;
-            txtColorSecondary.Enabled = hasVehicle;
-            numCarSpawnX.Enabled = hasVehicle;
-            numCarSpawnY.Enabled = hasVehicle;
-            numCarSpawnZ.Enabled = hasVehicle;
-            btnGetCarSpawnCoords.Enabled = hasVehicle;
-        }
-
         private void BtnGetHomeCoords_Click(object sender, EventArgs e)
-        {
-            // This would need to interface with GTA V to get current player position
-            MessageBox.Show("This would get the current player position from GTA V", "Get Coordinates",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-
-        private void BtnGetCarSpawnCoords_Click(object sender, EventArgs e)
         {
             // This would need to interface with GTA V to get current player position
             MessageBox.Show("This would get the current player position from GTA V", "Get Coordinates",
@@ -474,7 +382,7 @@ namespace PersistentWorldAdmin
                             cmbGender.SelectedItem = reader["gender"]?.ToString() ?? "Male";
                             txtHomeAddress.Text = reader["home_address"]?.ToString() ?? "";
 
-                            // Home Location - check if columns exist
+                            // Home Location
                             try
                             {
                                 chkHasHome.Checked = reader["has_home"] != DBNull.Value ? Convert.ToInt32(reader["has_home"]) == 1 : false;
@@ -535,29 +443,7 @@ namespace PersistentWorldAdmin
                             numIncarceratedDays.Enabled = chkIsIncarcerated.Checked;
                             dtpReleaseDate.Enabled = chkIsIncarcerated.Checked;
 
-                            // Vehicle - check if columns exist
-                            try
-                            {
-                                chkHasVehicle.Checked = reader["has_vehicle"] != DBNull.Value ? Convert.ToInt32(reader["has_vehicle"]) == 1 : false;
-                                txtVehicleModel.Text = reader["vehicle_model"]?.ToString() ?? "";
-                                txtLicensePlate.Text = reader["license_plate"]?.ToString() ?? "";
-                                txtColorPrimary.Text = reader["color_primary"]?.ToString() ?? "";
-                                txtColorSecondary.Text = reader["color_secondary"]?.ToString() ?? "";
-
-                                if (reader["car_spawn_x"] != DBNull.Value)
-                                    numCarSpawnX.Value = Convert.ToDecimal(reader["car_spawn_x"]);
-                                if (reader["car_spawn_y"] != DBNull.Value)
-                                    numCarSpawnY.Value = Convert.ToDecimal(reader["car_spawn_y"]);
-                                if (reader["car_spawn_z"] != DBNull.Value)
-                                    numCarSpawnZ.Value = Convert.ToDecimal(reader["car_spawn_z"]);
-                            }
-                            catch
-                            {
-                                // Columns don't exist yet - use defaults
-                                chkHasVehicle.Checked = false;
-                            }
-
-                            // Spawn Percentages - check if columns exist
+                            // Spawn Percentages
                             try
                             {
                                 if (reader["is_home_percent"] != DBNull.Value)
@@ -571,7 +457,7 @@ namespace PersistentWorldAdmin
                             }
                             catch
                             {
-                                // Columns don't exist yet - use defaults
+                                // Use defaults
                                 numIsHomePercent.Value = 30;
                                 numIsDrivingPercent.Value = 30;
                                 numInWorldPercent.Value = 40;
@@ -583,7 +469,6 @@ namespace PersistentWorldAdmin
 
                             // Update UI states
                             UpdateHomeFields();
-                            UpdateVehicleFields();
                         }
                     }
                 }
@@ -636,7 +521,7 @@ namespace PersistentWorldAdmin
                 object incarceratedDays = chkIsIncarcerated.Checked ? (int)numIncarceratedDays.Value : (object)DBNull.Value;
                 object releaseDate = chkIsIncarcerated.Checked ? dtpReleaseDate.Value.ToString("yyyy-MM-dd HH:mm:ss") : (object)DBNull.Value;
 
-                // Home location values - using GetDoubleOrNull helper to avoid ternary issues
+                // Home location values
                 int hasHome = chkHasHome.Checked ? 1 : 0;
                 string homeType = cmbHomeType.SelectedItem?.ToString() ?? "None";
 
@@ -651,24 +536,6 @@ namespace PersistentWorldAdmin
                     homeZ = GetDoubleOrNull((decimal?)numHomeZ.Value);
                 }
 
-                // Vehicle values
-                int hasVehicle = chkHasVehicle.Checked ? 1 : 0;
-                object vehicleModel = chkHasVehicle.Checked ? GetValueOrNull(txtVehicleModel.Text) : DBNull.Value;
-                object licensePlate = chkHasVehicle.Checked ? GetValueOrNull(txtLicensePlate.Text) : DBNull.Value;
-                object colorPrimary = chkHasVehicle.Checked ? GetValueOrNull(txtColorPrimary.Text) : DBNull.Value;
-                object colorSecondary = chkHasVehicle.Checked ? GetValueOrNull(txtColorSecondary.Text) : DBNull.Value;
-
-                object carSpawnX = DBNull.Value;
-                object carSpawnY = DBNull.Value;
-                object carSpawnZ = DBNull.Value;
-
-                if (chkHasVehicle.Checked)
-                {
-                    carSpawnX = GetDoubleOrNull((decimal?)numCarSpawnX.Value);
-                    carSpawnY = GetDoubleOrNull((decimal?)numCarSpawnY.Value);
-                    carSpawnZ = GetDoubleOrNull((decimal?)numCarSpawnZ.Value);
-                }
-
                 // Spawn percentages
                 int isHomePercent = (int)numIsHomePercent.Value;
                 int isDrivingPercent = (int)numIsDrivingPercent.Value;
@@ -677,7 +544,7 @@ namespace PersistentWorldAdmin
 
                 if (_personId.HasValue)
                 {
-                    // Update
+                    // Update - REMOVED ALL VEHICLE FIELDS
                     string sql = @"
                         UPDATE peds SET
                             first_name = @firstName,
@@ -692,16 +559,6 @@ namespace PersistentWorldAdmin
                             home_coord_x = @homeX,
                             home_coord_y = @homeY,
                             home_coord_z = @homeZ,
-                            
-                            -- Vehicle
-                            has_vehicle = @hasVehicle,
-                            vehicle_model = @vehicleModel,
-                            license_plate = @licensePlate,
-                            color_primary = @colorPrimary,
-                            color_secondary = @colorSecondary,
-                            car_spawn_x = @carSpawnX,
-                            car_spawn_y = @carSpawnY,
-                            car_spawn_z = @carSpawnZ,
                             
                             -- Spawn percentages
                             is_home_percent = @isHomePercent,
@@ -739,16 +596,6 @@ namespace PersistentWorldAdmin
                         cmd.Parameters.AddWithValue("@homeX", homeX);
                         cmd.Parameters.AddWithValue("@homeY", homeY);
                         cmd.Parameters.AddWithValue("@homeZ", homeZ);
-
-                        // Vehicle params
-                        cmd.Parameters.AddWithValue("@hasVehicle", hasVehicle);
-                        cmd.Parameters.AddWithValue("@vehicleModel", vehicleModel);
-                        cmd.Parameters.AddWithValue("@licensePlate", licensePlate);
-                        cmd.Parameters.AddWithValue("@colorPrimary", colorPrimary);
-                        cmd.Parameters.AddWithValue("@colorSecondary", colorSecondary);
-                        cmd.Parameters.AddWithValue("@carSpawnX", carSpawnX);
-                        cmd.Parameters.AddWithValue("@carSpawnY", carSpawnY);
-                        cmd.Parameters.AddWithValue("@carSpawnZ", carSpawnZ);
 
                         // Spawn percent params
                         cmd.Parameters.AddWithValue("@isHomePercent", isHomePercent);
@@ -808,13 +655,11 @@ namespace PersistentWorldAdmin
                 }
                 else
                 {
-                    // Insert
+                    // Insert - REMOVED ALL VEHICLE FIELDS
                     string sql = @"
                         INSERT INTO peds (
                             first_name, last_name, model_name, gender, home_address,
                             has_home, home_type, home_coord_x, home_coord_y, home_coord_z,
-                            has_vehicle, vehicle_model, license_plate, color_primary, color_secondary,
-                            car_spawn_x, car_spawn_y, car_spawn_z,
                             is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                             license_number, license_status, license_reason, license_expiry,
                             license_class, date_of_birth, is_wanted, wanted_reason,
@@ -823,8 +668,6 @@ namespace PersistentWorldAdmin
                         ) VALUES (
                             @firstName, @lastName, @modelName, @gender, @homeAddress,
                             @hasHome, @homeType, @homeX, @homeY, @homeZ,
-                            @hasVehicle, @vehicleModel, @licensePlate, @colorPrimary, @colorSecondary,
-                            @carSpawnX, @carSpawnY, @carSpawnZ,
                             @isHomePercent, @isDrivingPercent, @inWorldPercent, @isCarryingGunPercent,
                             @licenseNumber, @licenseStatus, @licenseReason, @licenseExpiry,
                             @licenseClass, @dateOfBirth, @isWanted, @wantedReason,
@@ -846,16 +689,6 @@ namespace PersistentWorldAdmin
                         cmd.Parameters.AddWithValue("@homeX", homeX);
                         cmd.Parameters.AddWithValue("@homeY", homeY);
                         cmd.Parameters.AddWithValue("@homeZ", homeZ);
-
-                        // Vehicle params
-                        cmd.Parameters.AddWithValue("@hasVehicle", hasVehicle);
-                        cmd.Parameters.AddWithValue("@vehicleModel", vehicleModel);
-                        cmd.Parameters.AddWithValue("@licensePlate", licensePlate);
-                        cmd.Parameters.AddWithValue("@colorPrimary", colorPrimary);
-                        cmd.Parameters.AddWithValue("@colorSecondary", colorSecondary);
-                        cmd.Parameters.AddWithValue("@carSpawnX", carSpawnX);
-                        cmd.Parameters.AddWithValue("@carSpawnY", carSpawnY);
-                        cmd.Parameters.AddWithValue("@carSpawnZ", carSpawnZ);
 
                         // Spawn percent params
                         cmd.Parameters.AddWithValue("@isHomePercent", isHomePercent);

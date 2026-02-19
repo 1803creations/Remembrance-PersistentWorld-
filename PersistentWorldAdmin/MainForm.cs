@@ -37,6 +37,7 @@ namespace PersistentWorldAdmin
         private Button btnSetWanted;
         private Button btnClearWanted;
         private Button btnImportJson;
+        private Button btnMDT; // NEW MDT BUTTON
         private Label statusLabel;
         private TextBox txtSearch;
 
@@ -59,10 +60,16 @@ namespace PersistentWorldAdmin
             var openItem = new ToolStripMenuItem("Open Database...", null, (s, e) => OpenDatabaseDialog());
             var refreshItem = new ToolStripMenuItem("Refresh", null, (s, e) => RefreshAll());
             var backupItem = new ToolStripMenuItem("Backup Database", null, (s, e) => BackupDatabase());
+
+            // Add MDT to File menu
+            var mdtMenuItem = new ToolStripMenuItem("Launch Police MDT", null, (s, e) => LaunchMDT());
+
             fileMenu.DropDownItems.Add(openItem);
             fileMenu.DropDownItems.Add(refreshItem);
             fileMenu.DropDownItems.Add(new ToolStripSeparator());
             fileMenu.DropDownItems.Add(backupItem);
+            fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            fileMenu.DropDownItems.Add(mdtMenuItem); // MDT in File menu
             fileMenu.DropDownItems.Add(new ToolStripSeparator());
             fileMenu.DropDownItems.Add(exitItem);
             menuStrip.Items.Add(fileMenu);
@@ -133,6 +140,10 @@ namespace PersistentWorldAdmin
             btnImportJson = new Button { Text = "Import JSON", Location = new Point(450, 65), Size = new Size(100, 30), BackColor = Color.LightBlue };
             btnImportJson.Click += BtnImportJson_Click;
 
+            // NEW MDT BUTTON
+            btnMDT = new Button { Text = "Police MDT", Location = new Point(560, 65), Size = new Size(100, 30), BackColor = Color.LightBlue };
+            btnMDT.Click += BtnMDT_Click;
+
             // Row 3 buttons - Tickets
             var lblTickets = new Label { Text = "TICKETS:", Location = new Point(10, 100), Size = new Size(100, 20), Font = new Font("Arial", 9, FontStyle.Bold) };
             buttonPanel.Controls.Add(lblTickets);
@@ -163,7 +174,7 @@ namespace PersistentWorldAdmin
                 btnRefresh, btnAddPerson, btnEditPerson, btnDeletePerson,
                 btnSetWanted, btnClearWanted, btnIncarcerate, btnRelease,
                 btnAddVehicle, btnEditVehicle, btnDeleteVehicle,
-                btnImportJson,
+                btnImportJson, btnMDT, // ADDED MDT BUTTON HERE
                 btnAddTicket, btnEditTicket, btnDeleteTicket,
                 btnAddCompany, btnEditCompany, btnDeleteCompany
             });
@@ -387,7 +398,7 @@ namespace PersistentWorldAdmin
             }
             peopleGrid.DataSource = peopleTable;
 
-            // Search in vehicles - UPDATED with new fields
+            // Search in vehicles
             string vehicleQuery = @"
                 SELECT 
                     v.id,
@@ -848,6 +859,25 @@ namespace PersistentWorldAdmin
                 }
             }
             incarcerationHistoryGrid.DataSource = table;
+        }
+
+        // NEW METHOD: Launch External MDT
+        private void LaunchMDT()
+        {
+            if (_connection == null || _connection.State != System.Data.ConnectionState.Open)
+            {
+                MessageBox.Show("Please open a database first", "No Database",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var mdtForm = new ExternalMdtForm();
+            mdtForm.Show(); // Opens as separate window
+        }
+
+        private void BtnMDT_Click(object sender, EventArgs e)
+        {
+            LaunchMDT();
         }
 
         private void BtnAddPerson_Click(object sender, EventArgs e)
