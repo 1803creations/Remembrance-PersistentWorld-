@@ -669,11 +669,11 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
-        // VEHICLE MODEL UPDATE METHODS - UPDATED (NO MORE PEDS UPDATE)
+        // FIXED: VEHICLE MODEL UPDATE METHODS - ONLY UPDATE PERSONAL VEHICLES
         //=============================================================================
 
         /// <summary>
-        /// Updates vehicle model in the database (vehicles table only)
+        /// Updates vehicle model in the database - ONLY for personal vehicles, never company vehicles
         /// </summary>
         public void UpdateVehicleModel(string licensePlate, string newModel)
         {
@@ -684,13 +684,42 @@ namespace PersistentWorld.Database
 
                 Game.LogTrivial($"[Database] Attempting to update vehicle model for plate {licensePlate} to {newModel}");
 
-                string query = @"
+                // First, check if this is a personal vehicle (owner_type = 'person')
+                string checkQuery = "SELECT owner_type FROM vehicles WHERE license_plate = @plate AND is_active = 1";
+
+                string ownerType = null;
+                using (var checkCmd = new SQLiteCommand(checkQuery, _connection))
+                {
+                    checkCmd.Parameters.AddWithValue("@plate", licensePlate);
+
+                    var result = checkCmd.ExecuteScalar();
+                    if (result == null)
+                    {
+                        Game.LogTrivial($"[Database] No vehicle found with plate {licensePlate} to update");
+                        return;
+                    }
+
+                    ownerType = result.ToString();
+                }
+
+                // ONLY update if it's a personal vehicle
+                if (ownerType != "person")
+                {
+                    Game.LogTrivial($"[Database] SKIPPING model update for {licensePlate} - Vehicle is a {ownerType} vehicle (not personal)");
+                    Game.LogTrivial($"[Database] Company/Fleet vehicles are never modified to preserve fleet integrity");
+                    return;
+                }
+
+                // Now update only personal vehicles
+                string updateQuery = @"
                     UPDATE vehicles 
                     SET vehicle_model = @model,
                         last_modified = CURRENT_TIMESTAMP
-                    WHERE license_plate = @plate AND is_active = 1";
+                    WHERE license_plate = @plate 
+                      AND is_active = 1 
+                      AND owner_type = 'person'"; // Extra safety check
 
-                using (var cmd = new SQLiteCommand(query, _connection))
+                using (var cmd = new SQLiteCommand(updateQuery, _connection))
                 {
                     cmd.Parameters.AddWithValue("@plate", licensePlate);
                     cmd.Parameters.AddWithValue("@model", newModel);
@@ -699,11 +728,11 @@ namespace PersistentWorld.Database
 
                     if (rowsAffected > 0)
                     {
-                        Game.LogTrivial($"[Database] Updated vehicle model for {licensePlate} to {newModel}");
+                        Game.LogTrivial($"[Database] Updated personal vehicle model for {licensePlate} to {newModel}");
                     }
                     else
                     {
-                        Game.LogTrivial($"[Database] No vehicle found with plate {licensePlate} to update");
+                        Game.LogTrivial($"[Database] No personal vehicle found with plate {licensePlate} to update");
                     }
                 }
             }
@@ -714,7 +743,7 @@ namespace PersistentWorld.Database
         }
 
         /// <summary>
-        /// Batch updates multiple vehicle models at once
+        /// Batch updates multiple vehicle models at once - ONLY for personal vehicles
         /// </summary>
         public void BatchUpdateVehicleModels(Dictionary<string, string> plateToModelMap)
         {
@@ -723,24 +752,50 @@ namespace PersistentWorld.Database
                 if (plateToModelMap == null || plateToModelMap.Count == 0)
                     return;
 
-                Game.LogTrivial($"[Database] Batch updating {plateToModelMap.Count} vehicle models");
+                Game.LogTrivial($"[Database] Batch updating {plateToModelMap.Count} vehicle models (personal vehicles only)");
 
                 using (var transaction = _connection.BeginTransaction())
                 {
-                    string query = @"
-                        UPDATE vehicles 
-                        SET vehicle_model = @model,
-                            last_modified = CURRENT_TIMESTAMP
-                        WHERE license_plate = @plate AND is_active = 1";
-
                     int updatedCount = 0;
+                    int skippedCount = 0;
 
                     foreach (var kvp in plateToModelMap)
                     {
                         if (string.IsNullOrEmpty(kvp.Key) || string.IsNullOrEmpty(kvp.Value))
                             continue;
 
-                        using (var cmd = new SQLiteCommand(query, _connection))
+                        // Check owner type first
+                        string checkQuery = "SELECT owner_type FROM vehicles WHERE license_plate = @plate AND is_active = 1";
+                        string ownerType = null;
+
+                        using (var checkCmd = new SQLiteCommand(checkQuery, _connection))
+                        {
+                            checkCmd.Parameters.AddWithValue("@plate", kvp.Key);
+                            var result = checkCmd.ExecuteScalar();
+                            if (result != null)
+                            {
+                                ownerType = result.ToString();
+                            }
+                        }
+
+                        // Skip if not a personal vehicle
+                        if (ownerType != "person")
+                        {
+                            Game.LogTrivial($"[Database] SKIPPING batch update for {kvp.Key} - Vehicle is a {ownerType} vehicle (not personal)");
+                            skippedCount++;
+                            continue;
+                        }
+
+                        // Update personal vehicle
+                        string updateQuery = @"
+                            UPDATE vehicles 
+                            SET vehicle_model = @model,
+                                last_modified = CURRENT_TIMESTAMP
+                            WHERE license_plate = @plate 
+                              AND is_active = 1 
+                              AND owner_type = 'person'";
+
+                        using (var cmd = new SQLiteCommand(updateQuery, _connection, transaction))
                         {
                             cmd.Parameters.AddWithValue("@plate", kvp.Key);
                             cmd.Parameters.AddWithValue("@model", kvp.Value);
@@ -754,12 +809,137 @@ namespace PersistentWorld.Database
                     }
 
                     transaction.Commit();
-                    Game.LogTrivial($"[Database] Batch update completed: {updatedCount} vehicles updated");
+                    Game.LogTrivial($"[Database] Batch update completed: {updatedCount} personal vehicles updated, {skippedCount} non-personal vehicles skipped");
                 }
             }
             catch (Exception ex)
             {
                 Game.LogTrivial($"[Database] Error in batch update: {ex.Message}");
+            }
+        }
+
+        //=============================================================================
+        // NEW METHOD: Update person's vehicle information (creates or updates)
+        //=============================================================================
+        public bool UpdatePersonVehicle(string driverName, string plate, string model)
+        {
+            try
+            {
+                Game.LogTrivial($"[Database] Attempting to update vehicle info for {driverName}: Plate={plate}, Model={model}");
+
+                // Split the driver name into first and last
+                string[] nameParts = driverName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (nameParts.Length < 1) return false;
+
+                string firstName = nameParts[0];
+                string lastName = nameParts.Length > 1 ? string.Join(" ", nameParts.Skip(1)) : "";
+
+                // First, find the person ID
+                string findPersonQuery = "SELECT id FROM peds WHERE first_name = @firstName AND last_name = @lastName AND is_active = 1";
+                int personId = -1;
+
+                using (var cmd = new SQLiteCommand(findPersonQuery, _connection))
+                {
+                    cmd.Parameters.AddWithValue("@firstName", firstName);
+                    cmd.Parameters.AddWithValue("@lastName", lastName);
+
+                    var result = cmd.ExecuteScalar();
+                    if (result != null)
+                    {
+                        personId = Convert.ToInt32(result);
+                    }
+                    else
+                    {
+                        Game.LogTrivial($"[Database] Could not find person with name {driverName}");
+                        return false;
+                    }
+                }
+
+                // Check if this vehicle already exists for this person
+                string checkVehicleQuery = "SELECT id FROM vehicles WHERE owner_type = 'person' AND owner_id = @personId AND license_plate = @plate";
+                int vehicleId = -1;
+
+                using (var cmd = new SQLiteCommand(checkVehicleQuery, _connection))
+                {
+                    cmd.Parameters.AddWithValue("@personId", personId);
+                    cmd.Parameters.AddWithValue("@plate", plate);
+
+                    var result = cmd.ExecuteScalar();
+                    if (result != null)
+                    {
+                        vehicleId = Convert.ToInt32(result);
+                    }
+                }
+
+                if (vehicleId > 0)
+                {
+                    // Vehicle exists - update it
+                    string updateQuery = @"
+                        UPDATE vehicles 
+                        SET vehicle_model = @model,
+                            last_modified = CURRENT_TIMESTAMP
+                        WHERE id = @vehicleId";
+
+                    using (var cmd = new SQLiteCommand(updateQuery, _connection))
+                    {
+                        cmd.Parameters.AddWithValue("@vehicleId", vehicleId);
+                        cmd.Parameters.AddWithValue("@model", model);
+
+                        int rowsAffected = cmd.ExecuteNonQuery();
+                        Game.LogTrivial($"[Database] Updated existing vehicle {plate} for {driverName} to model {model}");
+                        return rowsAffected > 0;
+                    }
+                }
+                else
+                {
+                    // Vehicle doesn't exist - create it
+                    string insertQuery = @"
+                        INSERT INTO vehicles (
+                            license_plate, 
+                            vehicle_model, 
+                            color_primary, 
+                            color_secondary, 
+                            registered_state, 
+                            owner_type, 
+                            owner_id,
+                            registration_expiry,
+                            insurance_expiry,
+                            is_stolen,
+                            no_registration,
+                            no_insurance,
+                            notes
+                        ) VALUES (
+                            @plate,
+                            @model,
+                            'Unknown',
+                            'Unknown',
+                            'San Andreas',
+                            'person',
+                            @personId,
+                            '2026-12-01',
+                            '2026-12-01',
+                            0,
+                            0,
+                            0,
+                            'Auto-created from vehicle scan'
+                        )";
+
+                    using (var cmd = new SQLiteCommand(insertQuery, _connection))
+                    {
+                        cmd.Parameters.AddWithValue("@plate", plate);
+                        cmd.Parameters.AddWithValue("@model", model);
+                        cmd.Parameters.AddWithValue("@personId", personId);
+
+                        int rowsAffected = cmd.ExecuteNonQuery();
+                        Game.LogTrivial($"[Database] Created new vehicle {plate} for {driverName} with model {model}");
+                        return rowsAffected > 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[Database] Error in UpdatePersonVehicle: {ex.Message}");
+                return false;
             }
         }
 

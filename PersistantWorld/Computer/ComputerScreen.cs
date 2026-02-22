@@ -71,9 +71,13 @@ namespace PersistentWorld.Computer
         private bool _cursorVisible = true;
         private DateTime _lastCursorBlink = DateTime.Now;
 
-        // Input debounce
+        // Input debounce - FIXED: Increased timings and added per-key tracking
         private DateTime _lastKeyPress = DateTime.Now;
         private DateTime _lastControllerInput = DateTime.Now;
+        private Dictionary<Keys, DateTime> _lastKeyStates = new Dictionary<Keys, DateTime>();
+        private Dictionary<int, DateTime> _lastControllerStates = new Dictionary<int, DateTime>();
+        private const int KEY_DEBOUNCE_MS = 250; // Increased from 100ms to 250ms
+        private const int CONTROLLER_DEBOUNCE_MS = 300; // Increased from 150ms to 300ms
 
         // Config path
         private string _configPath;
@@ -95,6 +99,9 @@ namespace PersistentWorld.Computer
 
         // Store original audio state
         private string _originalAudioMode = null;
+
+        // FIXED: Track if we're showing owner info prompt
+        private bool _showingOwnerPrompt = false;
 
         private class PersonSuggestion
         {
@@ -225,10 +232,10 @@ namespace PersistentWorld.Computer
                                         _vehicleSuggestionsList.Add(new VehicleSuggestion
                                         {
                                             Id = id,
-                                            LicensePlate = plate.ToUpper(),
+                                            LicensePlate = plate.ToUpper().Trim(), // FIXED: Trim the plate
                                             Model = model,
                                             OwnerName = ownerName,
-                                            DisplayName = $"{plate} - {model} ({ownerName})"
+                                            DisplayName = $"{plate.Trim()} - {model} ({ownerName})" // FIXED: Trim the plate
                                         });
                                     }
                                 }
@@ -515,16 +522,16 @@ namespace PersistentWorld.Computer
                 _hasAutofilled = true;
             }
 
-            // Auto-fill vehicle plate only once when computer first opens
+            // FIXED: Auto-fill vehicle plate with Trim() to remove extra spaces
             if (!_hasAutoFilledPlate && _currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
             {
                 string plate = _currentSuspectVehicle.LicensePlate;
                 if (!string.IsNullOrEmpty(plate))
                 {
                     _vehiclePlateInput.Clear();
-                    _vehiclePlateInput.Append(plate);
+                    _vehiclePlateInput.Append(plate.Trim()); // FIXED: Trim the plate to remove spaces
                     _hasAutoFilledPlate = true;
-                    Game.LogTrivial($"[Computer] Auto-filled vehicle plate: {plate}");
+                    Game.LogTrivial($"[Computer] Auto-filled vehicle plate: '{plate.Trim()}' (was '{plate}')");
                 }
             }
 
@@ -537,7 +544,7 @@ namespace PersistentWorld.Computer
             }
         }
 
-        
+
         private bool IsPlayerInEmergencyVehicle()
         {
             try
@@ -619,6 +626,10 @@ namespace PersistentWorld.Computer
             _isOpen = true;
             _hasAutofilled = false;
             _hasAutoFilledPlate = false;
+
+            // Clear key state dictionaries
+            _lastKeyStates.Clear();
+            _lastControllerStates.Clear();
 
             // Get current pullover info
             GetCurrentPullover();
@@ -734,6 +745,7 @@ namespace PersistentWorld.Computer
             _ticketMenuScrollOffset = 0;
             _citationLocation.Clear();
             _showingArrests = false;
+            _showingOwnerPrompt = false; // FIXED: Reset owner prompt flag
 
             // Reset vehicle selection
             _availableVehicles.Clear();
@@ -907,245 +919,119 @@ namespace PersistentWorld.Computer
             }
         }
 
+        // FIXED: Improved input handling with per-key debouncing
         private void HandleInput()
         {
-            if ((DateTime.Now - _lastKeyPress).TotalMilliseconds < 100)
+            // Check if enough time has passed since last ANY key press
+            if ((DateTime.Now - _lastKeyPress).TotalMilliseconds < KEY_DEBOUNCE_MS)
                 return;
 
-            // ONLY ESCAPE closes the computer
+            bool keyProcessed = false;
+
+            // ONLY ESCAPE closes the computer - with debounce
             if (Game.IsKeyDown(Keys.Escape))
             {
-                if (_currentScreen == ScreenMode.TicketMenu)
+                // Check individual key debounce
+                if (!_lastKeyStates.ContainsKey(Keys.Escape) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Escape]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    _currentScreen = ScreenMode.Search;
+                    _lastKeyStates[Keys.Escape] = DateTime.Now;
                     _lastKeyPress = DateTime.Now;
-                }
-                else if (_currentScreen == ScreenMode.VehicleSelection)
-                {
-                    _currentScreen = ScreenMode.TicketMenu;
-                    _lastKeyPress = DateTime.Now;
-                }
-                else if (_currentScreen == ScreenMode.PersonDetails)
-                {
-                    _currentScreen = ScreenMode.Search;
-                    _lastKeyPress = DateTime.Now;
-                }
-                else if (_currentScreen == ScreenMode.VehicleDetails)
-                {
-                    _currentScreen = ScreenMode.Search;
-                    _lastKeyPress = DateTime.Now;
-                }
-                else
-                {
-                    Close();
+
+                    if (_currentScreen == ScreenMode.TicketMenu)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleSelection)
+                    {
+                        _currentScreen = ScreenMode.TicketMenu;
+                    }
+                    else if (_currentScreen == ScreenMode.PersonDetails)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleDetails)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                        _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                    }
+                    else
+                    {
+                        Close();
+                    }
                 }
                 return;
             }
 
             if (_currentScreen == ScreenMode.Search)
             {
-                HandleSearchInput();
+                HandleSearchInput(ref keyProcessed);
             }
             else if (_currentScreen == ScreenMode.TicketMenu)
             {
-                HandleTicketMenuInput();
+                HandleTicketMenuInput(ref keyProcessed);
             }
             else if (_currentScreen == ScreenMode.VehicleSelection)
             {
-                HandleVehicleSelectionInput();
+                HandleVehicleSelectionInput(ref keyProcessed);
             }
             else if (_currentScreen == ScreenMode.PersonDetails)
             {
-                HandlePersonDetailsInput();
+                HandlePersonDetailsInput(ref keyProcessed);
             }
             else if (_currentScreen == ScreenMode.VehicleDetails)
             {
-                HandleVehicleDetailsInput();
+                HandleVehicleDetailsInput(ref keyProcessed);
+            }
+
+            if (keyProcessed)
+            {
+                _lastKeyPress = DateTime.Now;
             }
         }
 
-        private void HandlePersonDetailsInput()
+        // FIXED: Person details input with debouncing
+        private void HandlePersonDetailsInput(ref bool keyProcessed)
         {
             // F6 to issue ticket (keyboard)
             if (Game.IsKeyDown(Keys.F6))
             {
-                OpenTicketMenu();
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-
-            // Back to search
-            if (Game.IsKeyDown(Keys.Back) || Game.IsKeyDown(Keys.Escape))
-            {
-                _currentScreen = ScreenMode.Search;
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-        }
-
-        private void HandleVehicleDetailsInput()
-        {
-            // F6 to issue ticket (keyboard)
-            if (Game.IsKeyDown(Keys.F6))
-            {
-                if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                if (!_lastKeyStates.ContainsKey(Keys.F6) ||
+                    (DateTime.Now - _lastKeyStates[Keys.F6]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                    string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                    string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
-
-                    if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
-                    {
-                        var personResults = _database.LookupByName(firstName, lastName);
-                        if (personResults != null && personResults.Count > 0)
-                        {
-                            _lastPersonResults = personResults;
-                            _selectedResultIndex = 0;
-                            _currentSelectedPerson = personResults[0];
-                            OpenTicketMenu();
-                        }
-                    }
-                }
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-
-            // Go to owner lookup
-            if (Game.IsKeyDown(Keys.Enter) && _currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
-            {
-                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
-
-                if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
-                {
-                    _currentSearchMode = SearchMode.Person;
-                    _personFirstNameInput.Clear();
-                    _personFirstNameInput.Append(firstName);
-                    _personLastNameInput.Clear();
-                    _personLastNameInput.Append(lastName);
-                    PerformSearch();
-                }
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-
-            // Back to search
-            if (Game.IsKeyDown(Keys.Back) || Game.IsKeyDown(Keys.Escape))
-            {
-                _currentScreen = ScreenMode.Search;
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-        }
-
-        private void HandleControllerInput()
-        {
-            if ((DateTime.Now - _lastControllerInput).TotalMilliseconds < 150)
-                return;
-
-            bool dpadDown = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 187) == 1;
-            bool dpadUp = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 188) == 1;
-            bool dpadLeft = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 189) == 1;
-            bool dpadRight = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 190) == 1;
-            bool aButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 201) == 1;
-            bool bButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 202) == 1;
-            bool xButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 203) == 1;
-            bool yButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 204) == 1;
-            bool leftBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 205) == 1;
-            bool rightBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 206) == 1;
-
-            // B button = Back/Cancel
-            if (bButton)
-            {
-                if (_currentScreen == ScreenMode.TicketMenu)
-                {
-                    if (_citationLocation.Length > 0)
-                    {
-                        _citationLocation.Remove(_citationLocation.Length - 1, 1);
-                    }
-                    else
-                    {
-                        _currentScreen = ScreenMode.Search;
-                    }
-                }
-                else if (_currentScreen == ScreenMode.VehicleSelection)
-                {
-                    if (_vehicleSearchInput.Length > 0)
-                    {
-                        _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
-                        UpdateVehicleSuggestions();
-                    }
-                    else
-                    {
-                        _currentScreen = ScreenMode.TicketMenu;
-                    }
-                }
-                else if (_currentScreen == ScreenMode.PersonDetails || _currentScreen == ScreenMode.VehicleDetails)
-                {
-                    _currentScreen = ScreenMode.Search;
-                }
-                else if (_currentScreen != ScreenMode.Search)
-                {
-                    _currentScreen = ScreenMode.Search;
-                }
-                _lastControllerInput = DateTime.Now;
-                return;
-            }
-
-            // Right Bumper = Switch Mode / Switch between citations and arrests
-            if (rightBumper)
-            {
-                if (_currentScreen == ScreenMode.Search)
-                {
-                    SwitchMode();
-                }
-                else if (_currentScreen == ScreenMode.TicketMenu)
-                {
-                    _showingArrests = !_showingArrests;
-                    _selectedTicketIndex = 0;
-                    _ticketMenuScrollOffset = 0;
-                }
-                _lastControllerInput = DateTime.Now;
-                return;
-            }
-
-            // X button = View Owner
-            if (xButton)
-            {
-                if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
-                {
-                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
-                    {
-                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
-
-                        if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
-                        {
-                            _currentSearchMode = SearchMode.Person;
-                            _personFirstNameInput.Clear();
-                            _personFirstNameInput.Append(firstName);
-                            _personLastNameInput.Clear();
-                            _personLastNameInput.Append(lastName);
-                            PerformSearch();
-                        }
-                    }
-                }
-                _lastControllerInput = DateTime.Now;
-                return;
-            }
-
-            // Y button = Issue Ticket
-            if (yButton)
-            {
-                if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
-                {
+                    _lastKeyStates[Keys.F6] = DateTime.Now;
                     OpenTicketMenu();
+                    keyProcessed = true;
                 }
-                else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                return;
+            }
+
+            // Back to search
+            if (Game.IsKeyDown(Keys.Back))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.Back) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Back]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                    _lastKeyStates[Keys.Back] = DateTime.Now;
+                    _currentScreen = ScreenMode.Search;
+                    keyProcessed = true;
+                }
+                return;
+            }
+        }
+
+        // FIXED: Vehicle details input - requires extra step to view owner
+        private void HandleVehicleDetailsInput(ref bool keyProcessed)
+        {
+            // F6 to issue ticket (keyboard)
+            if (Game.IsKeyDown(Keys.F6))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.F6) ||
+                    (DateTime.Now - _lastKeyStates[Keys.F6]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.F6] = DateTime.Now;
+
+                    if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                     {
                         int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
                         string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
@@ -1163,16 +1049,476 @@ namespace PersistentWorld.Computer
                             }
                         }
                     }
+                    keyProcessed = true;
                 }
-                _lastControllerInput = DateTime.Now;
+                return;
+            }
+
+            // FIXED: Enter now requires TWO presses to go to owner (first shows prompt, second goes)
+            if (Game.IsKeyDown(Keys.Enter))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.Enter) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Enter]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Enter] = DateTime.Now;
+
+                    if (!_showingOwnerPrompt)
+                    {
+                        // First press - show prompt
+                        _showingOwnerPrompt = true;
+                        Game.DisplayNotification("Press ~g~ENTER~w~ again to view owner details");
+                    }
+                    else
+                    {
+                        // Second press - go to owner
+                        if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                        {
+                            int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                            string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                            string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                            if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                            {
+                                _currentSearchMode = SearchMode.Person;
+                                _personFirstNameInput.Clear();
+                                _personFirstNameInput.Append(firstName);
+                                _personLastNameInput.Clear();
+                                _personLastNameInput.Append(lastName);
+                                PerformSearch();
+                                _showingOwnerPrompt = false;
+                            }
+                        }
+                    }
+                    keyProcessed = true;
+                }
+                return;
+            }
+
+            // Back to search
+            if (Game.IsKeyDown(Keys.Back))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.Back) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Back]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Back] = DateTime.Now;
+                    _currentScreen = ScreenMode.Search;
+                    _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                    keyProcessed = true;
+                }
+                return;
+            }
+        }
+
+        // FIXED: Controller input with improved debouncing
+        private void HandleControllerInput()
+        {
+            if ((DateTime.Now - _lastControllerInput).TotalMilliseconds < CONTROLLER_DEBOUNCE_MS)
+                return;
+
+            bool dpadDown = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 187) == 1;
+            bool dpadUp = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 188) == 1;
+            bool dpadLeft = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 189) == 1;
+            bool dpadRight = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 190) == 1;
+            bool aButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 201) == 1;
+            bool bButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 202) == 1;
+            bool xButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 203) == 1;
+            bool yButton = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 204) == 1;
+            bool leftBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 205) == 1;
+            bool rightBumper = NativeFunction.Natives.IS_DISABLED_CONTROL_PRESSED<int>(0, 206) == 1;
+
+            // Dictionary keys for controller buttons
+            int B_BUTTON = 202;
+            int RIGHT_BUMPER = 206;
+            int X_BUTTON = 203;
+            int Y_BUTTON = 204;
+            int A_BUTTON = 201;
+            int DPAD_UP = 188;
+            int DPAD_DOWN = 187;
+            int DPAD_LEFT = 189;
+            int DPAD_RIGHT = 190;
+
+            // B button = Back/Cancel
+            if (bButton)
+            {
+                if (!_lastControllerStates.ContainsKey(B_BUTTON) ||
+                    (DateTime.Now - _lastControllerStates[B_BUTTON]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[B_BUTTON] = DateTime.Now;
+
+                    if (_currentScreen == ScreenMode.TicketMenu)
+                    {
+                        if (_citationLocation.Length > 0)
+                        {
+                            _citationLocation.Remove(_citationLocation.Length - 1, 1);
+                        }
+                        else
+                        {
+                            _currentScreen = ScreenMode.Search;
+                        }
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleSelection)
+                    {
+                        if (_vehicleSearchInput.Length > 0)
+                        {
+                            _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
+                            UpdateVehicleSuggestions();
+                        }
+                        else
+                        {
+                            _currentScreen = ScreenMode.TicketMenu;
+                        }
+                    }
+                    else if (_currentScreen == ScreenMode.PersonDetails)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleDetails)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                        _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                    }
+                    else if (_currentScreen != ScreenMode.Search)
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            // Right Bumper = Switch Mode / Switch between citations and arrests
+            if (rightBumper)
+            {
+                if (!_lastControllerStates.ContainsKey(RIGHT_BUMPER) ||
+                    (DateTime.Now - _lastControllerStates[RIGHT_BUMPER]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[RIGHT_BUMPER] = DateTime.Now;
+
+                    if (_currentScreen == ScreenMode.Search)
+                    {
+                        SwitchMode();
+                    }
+                    else if (_currentScreen == ScreenMode.TicketMenu)
+                    {
+                        _showingArrests = !_showingArrests;
+                        _selectedTicketIndex = 0;
+                        _ticketMenuScrollOffset = 0;
+                    }
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            // X button = View Owner (with extra step for vehicle details)
+            if (xButton)
+            {
+                if (!_lastControllerStates.ContainsKey(X_BUTTON) ||
+                    (DateTime.Now - _lastControllerStates[X_BUTTON]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[X_BUTTON] = DateTime.Now;
+
+                    if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                    {
+                        if (!_showingOwnerPrompt)
+                        {
+                            // First press - show prompt
+                            _showingOwnerPrompt = true;
+                            Game.DisplayNotification("Press ~b~X~w~ again to view owner details");
+                        }
+                        else
+                        {
+                            // Second press - go to owner
+                            if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                            {
+                                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                                if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                                {
+                                    _currentSearchMode = SearchMode.Person;
+                                    _personFirstNameInput.Clear();
+                                    _personFirstNameInput.Append(firstName);
+                                    _personLastNameInput.Clear();
+                                    _personLastNameInput.Append(lastName);
+                                    PerformSearch();
+                                    _showingOwnerPrompt = false;
+                                }
+                            }
+                        }
+                    }
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            // Y button = Issue Ticket
+            if (yButton)
+            {
+                if (!_lastControllerStates.ContainsKey(Y_BUTTON) ||
+                    (DateTime.Now - _lastControllerStates[Y_BUTTON]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[Y_BUTTON] = DateTime.Now;
+
+                    if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
+                    {
+                        OpenTicketMenu();
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                    {
+                        if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                        {
+                            int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                            string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                            string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                            if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                            {
+                                var personResults = _database.LookupByName(firstName, lastName);
+                                if (personResults != null && personResults.Count > 0)
+                                {
+                                    _lastPersonResults = personResults;
+                                    _selectedResultIndex = 0;
+                                    _currentSelectedPerson = personResults[0];
+                                    OpenTicketMenu();
+                                }
+                            }
+                        }
+                    }
+                    _lastControllerInput = DateTime.Now;
+                }
                 return;
             }
 
             // A button = Select / Search / Next
             if (aButton)
             {
-                if (_currentScreen == ScreenMode.Search)
+                if (!_lastControllerStates.ContainsKey(A_BUTTON) ||
+                    (DateTime.Now - _lastControllerStates[A_BUTTON]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
                 {
+                    _lastControllerStates[A_BUTTON] = DateTime.Now;
+
+                    if (_currentScreen == ScreenMode.Search)
+                    {
+                        if (_showSuggestions && _selectedSuggestionIndex >= 0)
+                        {
+                            SelectSuggestion();
+                        }
+                        else
+                        {
+                            PerformSearch();
+                        }
+                    }
+                    else if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
+                    {
+                        OpenTicketMenu();
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
+                    {
+                        // FIXED: For vehicle details, A button now requires two presses
+                        if (!_showingOwnerPrompt)
+                        {
+                            _showingOwnerPrompt = true;
+                            Game.DisplayNotification("Press ~g~A~w~ again to view owner details");
+                        }
+                        else
+                        {
+                            if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
+                            {
+                                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
+                                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
+                                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+
+                                if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                                {
+                                    _currentSearchMode = SearchMode.Person;
+                                    _personFirstNameInput.Clear();
+                                    _personFirstNameInput.Append(firstName);
+                                    _personLastNameInput.Clear();
+                                    _personLastNameInput.Append(lastName);
+                                    PerformSearch();
+                                    _showingOwnerPrompt = false;
+                                }
+                            }
+                        }
+                    }
+                    else if (_currentScreen == ScreenMode.TicketMenu)
+                    {
+                        OpenVehicleSelection();
+                    }
+                    else if (_currentScreen == ScreenMode.VehicleSelection)
+                    {
+                        if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                        {
+                            SelectVehicleSuggestion();
+                        }
+                    }
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            // D-Pad navigation with debouncing
+            if (dpadUp)
+            {
+                if (!_lastControllerStates.ContainsKey(DPAD_UP) ||
+                    (DateTime.Now - _lastControllerStates[DPAD_UP]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[DPAD_UP] = DateTime.Now;
+                    HandleDPadUp();
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            if (dpadDown)
+            {
+                if (!_lastControllerStates.ContainsKey(DPAD_DOWN) ||
+                    (DateTime.Now - _lastControllerStates[DPAD_DOWN]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                {
+                    _lastControllerStates[DPAD_DOWN] = DateTime.Now;
+                    HandleDPadDown();
+                    _lastControllerInput = DateTime.Now;
+                }
+                return;
+            }
+
+            if (dpadLeft || dpadRight)
+            {
+                if (_currentScreen == ScreenMode.Search && _currentSearchMode == SearchMode.Person)
+                {
+                    int dpadKey = dpadLeft ? DPAD_LEFT : DPAD_RIGHT;
+                    if (!_lastControllerStates.ContainsKey(dpadKey) ||
+                        (DateTime.Now - _lastControllerStates[dpadKey]).TotalMilliseconds > CONTROLLER_DEBOUNCE_MS)
+                    {
+                        _lastControllerStates[dpadKey] = DateTime.Now;
+                        _activePersonField = (_activePersonField == PersonField.FirstName) ?
+                            PersonField.LastName : PersonField.FirstName;
+                        _lastControllerInput = DateTime.Now;
+                    }
+                }
+                return;
+            }
+        }
+
+        // FIXED: Separated D-Pad navigation handlers
+        private void HandleDPadUp()
+        {
+            if (_currentScreen == ScreenMode.Search)
+            {
+                if (_showSuggestions)
+                {
+                    _selectedSuggestionIndex--;
+                    if (_selectedSuggestionIndex < 0)
+                        _selectedSuggestionIndex = _quickSuggestions.Count - 1;
+                }
+                else if (_lastPersonResults != null && _lastPersonResults.Count > 1)
+                {
+                    _selectedResultIndex--;
+                    if (_selectedResultIndex < 0)
+                        _selectedResultIndex = _lastPersonResults.Count - 1;
+                    DisplaySelectedPerson();
+                }
+            }
+            else if (_currentScreen == ScreenMode.TicketMenu)
+            {
+                _selectedTicketIndex--;
+                List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
+
+                if (_selectedTicketIndex < 0)
+                    _selectedTicketIndex = currentList.Count - 1;
+
+                if (_selectedTicketIndex < _ticketMenuScrollOffset)
+                    _ticketMenuScrollOffset = _selectedTicketIndex;
+            }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                if (_showVehicleSuggestions)
+                {
+                    _selectedVehicleSuggestionIndex--;
+                    if (_selectedVehicleSuggestionIndex < 0)
+                        _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
+                }
+            }
+        }
+
+        private void HandleDPadDown()
+        {
+            if (_currentScreen == ScreenMode.Search)
+            {
+                if (_showSuggestions)
+                {
+                    _selectedSuggestionIndex++;
+                    if (_selectedSuggestionIndex >= _quickSuggestions.Count)
+                        _selectedSuggestionIndex = 0;
+                }
+                else if (_lastPersonResults != null && _lastPersonResults.Count > 1)
+                {
+                    _selectedResultIndex++;
+                    if (_selectedResultIndex >= _lastPersonResults.Count)
+                        _selectedResultIndex = 0;
+                    DisplaySelectedPerson();
+                }
+            }
+            else if (_currentScreen == ScreenMode.TicketMenu)
+            {
+                _selectedTicketIndex++;
+                List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
+
+                if (_selectedTicketIndex >= currentList.Count)
+                    _selectedTicketIndex = 0;
+
+                if (_selectedTicketIndex >= _ticketMenuScrollOffset + MAX_VISIBLE_TICKETS)
+                    _ticketMenuScrollOffset = _selectedTicketIndex - MAX_VISIBLE_TICKETS + 1;
+            }
+            else if (_currentScreen == ScreenMode.VehicleSelection)
+            {
+                if (_showVehicleSuggestions)
+                {
+                    _selectedVehicleSuggestionIndex++;
+                    if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                        _selectedVehicleSuggestionIndex = 0;
+                }
+            }
+        }
+
+        // FIXED: Search input handler with debouncing - E key now ONLY types E
+        private void HandleSearchInput(ref bool keyProcessed)
+        {
+            // Tab key for mode switching (keyboard) - NOT E
+            if (Game.IsKeyDown(Keys.Tab))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.Tab) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Tab]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Tab] = DateTime.Now;
+                    SwitchMode();
+                    keyProcessed = true;
+                }
+                return;
+            }
+
+            // F6 for ticket menu
+            if (Game.IsKeyDown(Keys.F6) && _lastPersonResults != null && _lastPersonResults.Count > 0)
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.F6) ||
+                    (DateTime.Now - _lastKeyStates[Keys.F6]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.F6] = DateTime.Now;
+                    OpenTicketMenu();
+                    keyProcessed = true;
+                }
+                return;
+            }
+
+            // Enter for search/select
+            if (Game.IsKeyDown(Keys.Enter))
+            {
+                if (!_lastKeyStates.ContainsKey(Keys.Enter) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Enter]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Enter] = DateTime.Now;
+
                     if (_showSuggestions && _selectedSuggestionIndex >= 0)
                     {
                         SelectSuggestion();
@@ -1181,221 +1527,58 @@ namespace PersistentWorld.Computer
                     {
                         PerformSearch();
                     }
-                }
-                else if (_currentScreen == ScreenMode.PersonDetails && _currentSelectedPerson != null)
-                {
-                    OpenTicketMenu();
-                }
-                else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
-                {
-                    // Go to owner lookup
-                    if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
-                    {
-                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
 
-                        if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
-                        {
-                            _currentSearchMode = SearchMode.Person;
-                            _personFirstNameInput.Clear();
-                            _personFirstNameInput.Append(firstName);
-                            _personLastNameInput.Clear();
-                            _personLastNameInput.Append(lastName);
-                            PerformSearch();
-                        }
-                    }
-                }
-                else if (_currentScreen == ScreenMode.TicketMenu)
-                {
-                    OpenVehicleSelection();
-                }
-                else if (_currentScreen == ScreenMode.VehicleSelection)
-                {
-                    if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                    if (_currentSearchMode == SearchMode.Person)
                     {
-                        SelectVehicleSuggestion();
+                        _activePersonField = PersonField.FirstName;
                     }
+                    keyProcessed = true;
                 }
-                _lastControllerInput = DateTime.Now;
                 return;
             }
 
-            // D-Pad navigation
-            if (_currentScreen == ScreenMode.Search)
+            // Field switching for Person mode (Up/Down arrows ONLY - NOT E)
+            if (_currentSearchMode == SearchMode.Person && (Game.IsKeyDown(Keys.Up) || Game.IsKeyDown(Keys.Down)))
             {
-                // Field switching for Person mode
-                if (_currentSearchMode == SearchMode.Person && (dpadLeft || dpadRight))
+                Keys key = Game.IsKeyDown(Keys.Up) ? Keys.Up : Keys.Down;
+                if (!_lastKeyStates.ContainsKey(key) ||
+                    (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
+                    _lastKeyStates[key] = DateTime.Now;
                     _activePersonField = (_activePersonField == PersonField.FirstName) ?
                         PersonField.LastName : PersonField.FirstName;
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                // Navigate suggestions or results
-                if (dpadUp)
-                {
-                    if (_showSuggestions)
-                    {
-                        _selectedSuggestionIndex--;
-                        if (_selectedSuggestionIndex < 0)
-                            _selectedSuggestionIndex = _quickSuggestions.Count - 1;
-                    }
-                    else if (_lastPersonResults != null && _lastPersonResults.Count > 1)
-                    {
-                        _selectedResultIndex--;
-                        if (_selectedResultIndex < 0)
-                            _selectedResultIndex = _lastPersonResults.Count - 1;
-                        DisplaySelectedPerson();
-                    }
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (dpadDown)
-                {
-                    if (_showSuggestions)
-                    {
-                        _selectedSuggestionIndex++;
-                        if (_selectedSuggestionIndex >= _quickSuggestions.Count)
-                            _selectedSuggestionIndex = 0;
-                    }
-                    else if (_lastPersonResults != null && _lastPersonResults.Count > 1)
-                    {
-                        _selectedResultIndex++;
-                        if (_selectedResultIndex >= _lastPersonResults.Count)
-                            _selectedResultIndex = 0;
-                        DisplaySelectedPerson();
-                    }
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-            }
-            else if (_currentScreen == ScreenMode.TicketMenu)
-            {
-                if (dpadUp)
-                {
-                    _selectedTicketIndex--;
-                    List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
-
-                    if (_selectedTicketIndex < 0)
-                        _selectedTicketIndex = currentList.Count - 1;
-
-                    if (_selectedTicketIndex < _ticketMenuScrollOffset)
-                        _ticketMenuScrollOffset = _selectedTicketIndex;
-
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (dpadDown)
-                {
-                    _selectedTicketIndex++;
-                    List<TicketTemplate> currentList = _showingArrests ? _arrestTemplates : _ticketTemplates;
-
-                    if (_selectedTicketIndex >= currentList.Count)
-                        _selectedTicketIndex = 0;
-
-                    if (_selectedTicketIndex >= _ticketMenuScrollOffset + MAX_VISIBLE_TICKETS)
-                        _ticketMenuScrollOffset = _selectedTicketIndex - MAX_VISIBLE_TICKETS + 1;
-
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-            }
-            else if (_currentScreen == ScreenMode.VehicleSelection)
-            {
-                if (dpadUp)
-                {
-                    if (_showVehicleSuggestions)
-                    {
-                        _selectedVehicleSuggestionIndex--;
-                        if (_selectedVehicleSuggestionIndex < 0)
-                            _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
-                    }
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-
-                if (dpadDown)
-                {
-                    if (_showVehicleSuggestions)
-                    {
-                        _selectedVehicleSuggestionIndex++;
-                        if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
-                            _selectedVehicleSuggestionIndex = 0;
-                    }
-                    _lastControllerInput = DateTime.Now;
-                    return;
-                }
-            }
-        }
-
-        private void HandleSearchInput()
-        {
-            if (Game.IsKeyDown(Keys.Tab))
-            {
-                SwitchMode();
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-
-            if (Game.IsKeyDown(Keys.F6) && _lastPersonResults != null && _lastPersonResults.Count > 0)
-            {
-                OpenTicketMenu();
-                _lastKeyPress = DateTime.Now;
-                return;
-            }
-
-            if (Game.IsKeyDown(Keys.Enter))
-            {
-                if (_showSuggestions && _selectedSuggestionIndex >= 0)
-                {
-                    SelectSuggestion();
-                }
-                else
-                {
-                    PerformSearch();
-                }
-                _lastKeyPress = DateTime.Now;
-
-                if (_currentSearchMode == SearchMode.Person)
-                {
-                    _activePersonField = PersonField.FirstName;
+                    keyProcessed = true;
                 }
                 return;
             }
 
-            // Field switching for Person mode
-            if (_currentSearchMode == SearchMode.Person)
-            {
-                if (Game.IsKeyDown(Keys.Up) || Game.IsKeyDown(Keys.Down))
-                {
-                    _activePersonField = (_activePersonField == PersonField.FirstName) ?
-                        PersonField.LastName : PersonField.FirstName;
-                    _lastKeyPress = DateTime.Now;
-                    return;
-                }
-            }
-
-            // Suggestion navigation
+            // Suggestion navigation (Up/Down arrows)
             if (_showSuggestions)
             {
                 if (Game.IsKeyDown(Keys.Up))
                 {
-                    _selectedSuggestionIndex--;
-                    if (_selectedSuggestionIndex < 0)
-                        _selectedSuggestionIndex = _quickSuggestions.Count - 1;
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Up) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Up]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Up] = DateTime.Now;
+                        _selectedSuggestionIndex--;
+                        if (_selectedSuggestionIndex < 0)
+                            _selectedSuggestionIndex = _quickSuggestions.Count - 1;
+                        keyProcessed = true;
+                    }
                     return;
                 }
                 if (Game.IsKeyDown(Keys.Down))
                 {
-                    _selectedSuggestionIndex++;
-                    if (_selectedSuggestionIndex >= _quickSuggestions.Count)
-                        _selectedSuggestionIndex = 0;
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Down) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Down]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Down] = DateTime.Now;
+                        _selectedSuggestionIndex++;
+                        if (_selectedSuggestionIndex >= _quickSuggestions.Count)
+                            _selectedSuggestionIndex = 0;
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
@@ -1403,20 +1586,30 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(Keys.Up))
                 {
-                    _selectedResultIndex--;
-                    if (_selectedResultIndex < 0)
-                        _selectedResultIndex = _lastPersonResults.Count - 1;
-                    DisplaySelectedPerson();
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Up) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Up]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Up] = DateTime.Now;
+                        _selectedResultIndex--;
+                        if (_selectedResultIndex < 0)
+                            _selectedResultIndex = _lastPersonResults.Count - 1;
+                        DisplaySelectedPerson();
+                        keyProcessed = true;
+                    }
                     return;
                 }
                 if (Game.IsKeyDown(Keys.Down))
                 {
-                    _selectedResultIndex++;
-                    if (_selectedResultIndex >= _lastPersonResults.Count)
-                        _selectedResultIndex = 0;
-                    DisplaySelectedPerson();
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Down) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Down]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Down] = DateTime.Now;
+                        _selectedResultIndex++;
+                        if (_selectedResultIndex >= _lastPersonResults.Count)
+                            _selectedResultIndex = 0;
+                        DisplaySelectedPerson();
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
@@ -1424,53 +1617,82 @@ namespace PersistentWorld.Computer
             // BACKSPACE now ONLY deletes characters
             if (Game.IsKeyDown(Keys.Back))
             {
-                HandleBackspace();
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Back) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Back]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Back] = DateTime.Now;
+                    HandleBackspace();
+                    keyProcessed = true;
+                }
                 return;
             }
 
-            // Letters A-Z
+            // Letters A-Z (including E - now ONLY types the letter E)
             for (Keys key = Keys.A; key <= Keys.Z; key++)
             {
                 if (Game.IsKeyDown(key))
                 {
-                    char c = (char)('A' + (key - Keys.A));
-                    HandleCharacter(c);
-                    _lastKeyPress = DateTime.Now;
+                    // Check if this specific key was recently pressed
+                    if (!_lastKeyStates.ContainsKey(key) ||
+                        (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[key] = DateTime.Now;
+                        char c = (char)('A' + (key - Keys.A));
+                        HandleCharacter(c);
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
 
+            // Numbers for vehicle mode
             if (_currentSearchMode == SearchMode.Vehicle)
             {
                 for (Keys key = Keys.D0; key <= Keys.D9; key++)
                 {
                     if (Game.IsKeyDown(key))
                     {
-                        char c = (char)('0' + (key - Keys.D0));
-                        HandleCharacter(c);
-                        _lastKeyPress = DateTime.Now;
+                        if (!_lastKeyStates.ContainsKey(key) ||
+                            (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                        {
+                            _lastKeyStates[key] = DateTime.Now;
+                            char c = (char)('0' + (key - Keys.D0));
+                            HandleCharacter(c);
+                            keyProcessed = true;
+                        }
                         return;
                     }
                 }
             }
 
+            // Space for person mode
             if (_currentSearchMode == SearchMode.Person && Game.IsKeyDown(Keys.Space))
             {
-                HandleCharacter(' ');
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Space) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Space]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Space] = DateTime.Now;
+                    HandleCharacter(' ');
+                    keyProcessed = true;
+                }
                 return;
             }
         }
 
-        private void HandleTicketMenuInput()
+        // FIXED: Ticket menu input handler with debouncing
+        private void HandleTicketMenuInput(ref bool keyProcessed)
         {
             if (Game.IsKeyDown(Keys.Tab))
             {
-                _showingArrests = !_showingArrests;
-                _selectedTicketIndex = 0;
-                _ticketMenuScrollOffset = 0;
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Tab) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Tab]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Tab] = DateTime.Now;
+                    _showingArrests = !_showingArrests;
+                    _selectedTicketIndex = 0;
+                    _ticketMenuScrollOffset = 0;
+                    keyProcessed = true;
+                }
                 return;
             }
 
@@ -1479,51 +1701,70 @@ namespace PersistentWorld.Computer
 
             if (Game.IsKeyDown(Keys.Up))
             {
-                _selectedTicketIndex--;
-                if (_selectedTicketIndex < 0)
-                    _selectedTicketIndex = currentList.Count - 1;
+                if (!_lastKeyStates.ContainsKey(Keys.Up) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Up]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Up] = DateTime.Now;
+                    _selectedTicketIndex--;
+                    if (_selectedTicketIndex < 0)
+                        _selectedTicketIndex = currentList.Count - 1;
 
-                // Update scroll offset if needed
-                if (_selectedTicketIndex < _ticketMenuScrollOffset)
-                    _ticketMenuScrollOffset = _selectedTicketIndex;
+                    if (_selectedTicketIndex < _ticketMenuScrollOffset)
+                        _ticketMenuScrollOffset = _selectedTicketIndex;
 
-                _lastKeyPress = DateTime.Now;
+                    keyProcessed = true;
+                }
                 return;
             }
 
             if (Game.IsKeyDown(Keys.Down))
             {
-                _selectedTicketIndex++;
-                if (_selectedTicketIndex >= currentList.Count)
-                    _selectedTicketIndex = 0;
+                if (!_lastKeyStates.ContainsKey(Keys.Down) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Down]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Down] = DateTime.Now;
+                    _selectedTicketIndex++;
+                    if (_selectedTicketIndex >= currentList.Count)
+                        _selectedTicketIndex = 0;
 
-                // Update scroll offset if needed
-                if (_selectedTicketIndex >= _ticketMenuScrollOffset + MAX_VISIBLE_TICKETS)
-                    _ticketMenuScrollOffset = _selectedTicketIndex - MAX_VISIBLE_TICKETS + 1;
+                    if (_selectedTicketIndex >= _ticketMenuScrollOffset + MAX_VISIBLE_TICKETS)
+                        _ticketMenuScrollOffset = _selectedTicketIndex - MAX_VISIBLE_TICKETS + 1;
 
-                _lastKeyPress = DateTime.Now;
+                    keyProcessed = true;
+                }
                 return;
             }
 
             if (Game.IsKeyDown(Keys.Enter))
             {
-                // Move to vehicle selection instead of issuing directly
-                OpenVehicleSelection();
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Enter) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Enter]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Enter] = DateTime.Now;
+                    // Move to vehicle selection instead of issuing directly
+                    OpenVehicleSelection();
+                    keyProcessed = true;
+                }
                 return;
             }
 
             if (Game.IsKeyDown(Keys.Back))
             {
-                if (_citationLocation.Length > 0)
+                if (!_lastKeyStates.ContainsKey(Keys.Back) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Back]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    _citationLocation.Remove(_citationLocation.Length - 1, 1);
+                    _lastKeyStates[Keys.Back] = DateTime.Now;
+
+                    if (_citationLocation.Length > 0)
+                    {
+                        _citationLocation.Remove(_citationLocation.Length - 1, 1);
+                    }
+                    else
+                    {
+                        _currentScreen = ScreenMode.Search;
+                    }
+                    keyProcessed = true;
                 }
-                else
-                {
-                    _currentScreen = ScreenMode.Search;
-                }
-                _lastKeyPress = DateTime.Now;
                 return;
             }
 
@@ -1531,10 +1772,15 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(key))
                 {
-                    char c = (char)('A' + (key - Keys.A));
-                    if (_citationLocation.Length < 30)
-                        _citationLocation.Append(c);
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(key) ||
+                        (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[key] = DateTime.Now;
+                        char c = (char)('A' + (key - Keys.A));
+                        if (_citationLocation.Length < 30)
+                            _citationLocation.Append(c);
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
@@ -1543,47 +1789,70 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(key))
                 {
-                    char c = (char)('0' + (key - Keys.D0));
-                    if (_citationLocation.Length < 30)
-                        _citationLocation.Append(c);
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(key) ||
+                        (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[key] = DateTime.Now;
+                        char c = (char)('0' + (key - Keys.D0));
+                        if (_citationLocation.Length < 30)
+                            _citationLocation.Append(c);
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
 
             if (Game.IsKeyDown(Keys.Space))
             {
-                if (_citationLocation.Length < 30)
-                    _citationLocation.Append(' ');
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Space) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Space]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Space] = DateTime.Now;
+                    if (_citationLocation.Length < 30)
+                        _citationLocation.Append(' ');
+                    keyProcessed = true;
+                }
                 return;
             }
         }
 
-        private void HandleVehicleSelectionInput()
+        // FIXED: Vehicle selection input handler with debouncing
+        private void HandleVehicleSelectionInput(ref bool keyProcessed)
         {
             if (Game.IsKeyDown(Keys.Enter))
             {
-                if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                if (!_lastKeyStates.ContainsKey(Keys.Enter) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Enter]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    SelectVehicleSuggestion();
+                    _lastKeyStates[Keys.Enter] = DateTime.Now;
+
+                    if (_showVehicleSuggestions && _selectedVehicleSuggestionIndex >= 0)
+                    {
+                        SelectVehicleSuggestion();
+                    }
+                    keyProcessed = true;
                 }
-                _lastKeyPress = DateTime.Now;
                 return;
             }
 
             if (Game.IsKeyDown(Keys.Back))
             {
-                if (_vehicleSearchInput.Length > 0)
+                if (!_lastKeyStates.ContainsKey(Keys.Back) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Back]).TotalMilliseconds > KEY_DEBOUNCE_MS)
                 {
-                    _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
-                    UpdateVehicleSuggestions();
+                    _lastKeyStates[Keys.Back] = DateTime.Now;
+
+                    if (_vehicleSearchInput.Length > 0)
+                    {
+                        _vehicleSearchInput.Remove(_vehicleSearchInput.Length - 1, 1);
+                        UpdateVehicleSuggestions();
+                    }
+                    else
+                    {
+                        _currentScreen = ScreenMode.TicketMenu;
+                    }
+                    keyProcessed = true;
                 }
-                else
-                {
-                    _currentScreen = ScreenMode.TicketMenu;
-                }
-                _lastKeyPress = DateTime.Now;
                 return;
             }
 
@@ -1591,18 +1860,28 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(Keys.Up))
                 {
-                    _selectedVehicleSuggestionIndex--;
-                    if (_selectedVehicleSuggestionIndex < 0)
-                        _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Up) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Up]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Up] = DateTime.Now;
+                        _selectedVehicleSuggestionIndex--;
+                        if (_selectedVehicleSuggestionIndex < 0)
+                            _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count - 1;
+                        keyProcessed = true;
+                    }
                     return;
                 }
                 if (Game.IsKeyDown(Keys.Down))
                 {
-                    _selectedVehicleSuggestionIndex++;
-                    if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
-                        _selectedVehicleSuggestionIndex = 0;
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(Keys.Down) ||
+                        (DateTime.Now - _lastKeyStates[Keys.Down]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[Keys.Down] = DateTime.Now;
+                        _selectedVehicleSuggestionIndex++;
+                        if (_selectedVehicleSuggestionIndex >= _vehicleSuggestions.Count)
+                            _selectedVehicleSuggestionIndex = 0;
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
@@ -1612,11 +1891,16 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(key))
                 {
-                    char c = (char)('A' + (key - Keys.A));
-                    if (_vehicleSearchInput.Length < 20)
-                        _vehicleSearchInput.Append(char.ToUpper(c));
-                    UpdateVehicleSuggestions();
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(key) ||
+                        (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[key] = DateTime.Now;
+                        char c = (char)('A' + (key - Keys.A));
+                        if (_vehicleSearchInput.Length < 20)
+                            _vehicleSearchInput.Append(char.ToUpper(c));
+                        UpdateVehicleSuggestions();
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
@@ -1626,21 +1910,31 @@ namespace PersistentWorld.Computer
             {
                 if (Game.IsKeyDown(key))
                 {
-                    char c = (char)('0' + (key - Keys.D0));
-                    if (_vehicleSearchInput.Length < 20)
-                        _vehicleSearchInput.Append(c);
-                    UpdateVehicleSuggestions();
-                    _lastKeyPress = DateTime.Now;
+                    if (!_lastKeyStates.ContainsKey(key) ||
+                        (DateTime.Now - _lastKeyStates[key]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                    {
+                        _lastKeyStates[key] = DateTime.Now;
+                        char c = (char)('0' + (key - Keys.D0));
+                        if (_vehicleSearchInput.Length < 20)
+                            _vehicleSearchInput.Append(c);
+                        UpdateVehicleSuggestions();
+                        keyProcessed = true;
+                    }
                     return;
                 }
             }
 
             if (Game.IsKeyDown(Keys.Space))
             {
-                if (_vehicleSearchInput.Length < 20)
-                    _vehicleSearchInput.Append(' ');
-                UpdateVehicleSuggestions();
-                _lastKeyPress = DateTime.Now;
+                if (!_lastKeyStates.ContainsKey(Keys.Space) ||
+                    (DateTime.Now - _lastKeyStates[Keys.Space]).TotalMilliseconds > KEY_DEBOUNCE_MS)
+                {
+                    _lastKeyStates[Keys.Space] = DateTime.Now;
+                    if (_vehicleSearchInput.Length < 20)
+                        _vehicleSearchInput.Append(' ');
+                    UpdateVehicleSuggestions();
+                    keyProcessed = true;
+                }
                 return;
             }
         }
@@ -1798,10 +2092,11 @@ namespace PersistentWorld.Computer
             _showSuggestions = false;
             _selectedSuggestionIndex = -1;
             _currentVehicle = null;
+            _showingOwnerPrompt = false; // FIXED: Reset owner prompt
 
             if (_currentSearchMode == SearchMode.Vehicle)
             {
-                string plate = _vehiclePlateInput.ToString();
+                string plate = _vehiclePlateInput.ToString().Trim(); // FIXED: Trim the plate input
                 if (string.IsNullOrEmpty(plate))
                 {
                     _leftColumnResults.Add("~r~Please enter a license plate");
@@ -1919,9 +2214,9 @@ namespace PersistentWorld.Computer
                         _leftColumnResults.Add($"~r~OWNER IS INCARCERATED");
                     }
 
-                    // Buttons for vehicle lookup
+                    // FIXED: Buttons for vehicle lookup - Now shows extra step requirement
                     _leftColumnResults.Add($"");
-                    _leftColumnResults.Add($"~g~[A/ENTER] View Owner Info");
+                    _leftColumnResults.Add($"~g~[A/ENTER] (press twice) View Owner Info");
                     _leftColumnResults.Add($"~y~[Y/F6] Issue Ticket to Owner");
 
                     // Get person info if owner is a person
@@ -2427,10 +2722,16 @@ namespace PersistentWorld.Computer
                 }
             }
 
+            // FIXED: Show prompt if waiting for second press
+            if (_showingOwnerPrompt)
+            {
+                DrawText(centerX, 0.8f, "Press again to view owner", 0.4f, 255, 255, 0, 255, true);
+            }
+
             float footerY = 0.88f;
             string footerText = "B Back | Y/F6 Ticket";
             if (_currentScreen == ScreenMode.VehicleDetails)
-                footerText = "X/A View Owner | Y/F6 Ticket | B Back";
+                footerText = "A/ENTER (twice) View Owner | Y/F6 Ticket | B Back";
 
             DrawText(centerX, footerY, footerText, 0.35f, 200, 200, 200, 255, true);
         }
@@ -2739,6 +3040,10 @@ namespace PersistentWorld.Computer
         {
             _isOpen = false;
             _gameFrozen = false;
+
+            // Clear key state dictionaries
+            _lastKeyStates.Clear();
+            _lastControllerStates.Clear();
 
             // Unfreeze the suspect if there was one
             if (_currentSuspect != null && _currentSuspect.Exists())
