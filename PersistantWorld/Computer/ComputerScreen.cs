@@ -71,13 +71,13 @@ namespace PersistentWorld.Computer
         private bool _cursorVisible = true;
         private DateTime _lastCursorBlink = DateTime.Now;
 
-        // Input debounce - FIXED: Increased timings and added per-key tracking
+        // Input debounce
         private DateTime _lastKeyPress = DateTime.Now;
         private DateTime _lastControllerInput = DateTime.Now;
         private Dictionary<Keys, DateTime> _lastKeyStates = new Dictionary<Keys, DateTime>();
         private Dictionary<int, DateTime> _lastControllerStates = new Dictionary<int, DateTime>();
-        private const int KEY_DEBOUNCE_MS = 250; // Increased from 100ms to 250ms
-        private const int CONTROLLER_DEBOUNCE_MS = 300; // Increased from 150ms to 300ms
+        private const int KEY_DEBOUNCE_MS = 250;
+        private const int CONTROLLER_DEBOUNCE_MS = 300;
 
         // Config path
         private string _configPath;
@@ -100,7 +100,7 @@ namespace PersistentWorld.Computer
         // Store original audio state
         private string _originalAudioMode = null;
 
-        // FIXED: Track if we're showing owner info prompt
+        // Track if we're showing owner info prompt
         private bool _showingOwnerPrompt = false;
 
         private class PersonSuggestion
@@ -176,10 +176,12 @@ namespace PersistentWorld.Computer
                         _personSuggestions.Clear();
                         foreach (var ped in allPeds)
                         {
-                            string firstName = ped["first_name"]?.ToString() ?? "";
-                            string lastName = ped["last_name"]?.ToString() ?? "";
-                            string fullName = $"{firstName} {lastName}";
-                            string employer = ped.ContainsKey("employer_name") ? ped["employer_name"]?.ToString() : "";
+                            if (ped == null) continue;
+
+                            string firstName = GetSafeString(ped, "first_name");
+                            string lastName = GetSafeString(ped, "last_name");
+                            string fullName = $"{firstName} {lastName}".Trim();
+                            string employer = GetSafeString(ped, "employer_name");
                             string displayName = string.IsNullOrEmpty(employer) ? fullName : $"{fullName} - {employer}";
 
                             _personSuggestions.Add(new PersonSuggestion
@@ -200,6 +202,54 @@ namespace PersistentWorld.Computer
             }
         }
 
+        // Helper method to safely get string from dictionary
+        private string GetSafeString(Dictionary<string, object> dict, string key)
+        {
+            if (dict == null) return "";
+            if (!dict.ContainsKey(key)) return "";
+            if (dict[key] == null) return "";
+            if (dict[key] == DBNull.Value) return "";
+            return dict[key].ToString();
+        }
+
+        // Helper method to safely get int from dictionary
+        private int GetSafeInt(Dictionary<string, object> dict, string key, int defaultValue = 0)
+        {
+            if (dict == null) return defaultValue;
+            if (!dict.ContainsKey(key)) return defaultValue;
+            if (dict[key] == null) return defaultValue;
+            if (dict[key] == DBNull.Value) return defaultValue;
+
+            try
+            {
+                return Convert.ToInt32(dict[key]);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        // Helper method to safely get bool from dictionary
+        private bool GetSafeBool(Dictionary<string, object> dict, string key, bool defaultValue = false)
+        {
+            if (dict == null) return defaultValue;
+            if (!dict.ContainsKey(key)) return defaultValue;
+            if (dict[key] == null) return defaultValue;
+            if (dict[key] == DBNull.Value) return defaultValue;
+
+            try
+            {
+                if (dict[key] is int)
+                    return (int)dict[key] == 1;
+                return Convert.ToBoolean(dict[key]);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
         // Load vehicle suggestions from database
         private void LoadVehicleSuggestions()
         {
@@ -214,6 +264,8 @@ namespace PersistentWorld.Computer
                     _vehicleSuggestionsList.Clear();
                     foreach (var ped in allPeds)
                     {
+                        if (ped == null) continue;
+
                         // Check if person has vehicles
                         if (ped.ContainsKey("owned_vehicles"))
                         {
@@ -222,20 +274,22 @@ namespace PersistentWorld.Computer
                             {
                                 foreach (var vehicle in vehicles)
                                 {
-                                    string plate = vehicle.ContainsKey("license_plate") ? vehicle["license_plate"].ToString() : "";
-                                    string model = vehicle.ContainsKey("vehicle_model") ? vehicle["vehicle_model"].ToString() : "";
-                                    int id = vehicle.ContainsKey("id") ? Convert.ToInt32(vehicle["id"]) : 0;
-                                    string ownerName = $"{ped["first_name"]} {ped["last_name"]}";
+                                    if (vehicle == null) continue;
+
+                                    string plate = GetSafeString(vehicle, "license_plate");
+                                    string model = GetSafeString(vehicle, "vehicle_model");
+                                    int id = GetSafeInt(vehicle, "id");
+                                    string ownerName = $"{GetSafeString(ped, "first_name")} {GetSafeString(ped, "last_name")}".Trim();
 
                                     if (!string.IsNullOrEmpty(plate) && id > 0)
                                     {
                                         _vehicleSuggestionsList.Add(new VehicleSuggestion
                                         {
                                             Id = id,
-                                            LicensePlate = plate.ToUpper().Trim(), // FIXED: Trim the plate
+                                            LicensePlate = plate.ToUpper().Trim(),
                                             Model = model,
                                             OwnerName = ownerName,
-                                            DisplayName = $"{plate.Trim()} - {model} ({ownerName})" // FIXED: Trim the plate
+                                            DisplayName = $"{plate.Trim()} - {model} ({ownerName})"
                                         });
                                     }
                                 }
@@ -522,14 +576,14 @@ namespace PersistentWorld.Computer
                 _hasAutofilled = true;
             }
 
-            // FIXED: Auto-fill vehicle plate with Trim() to remove extra spaces
+            // Auto-fill vehicle plate with Trim() to remove extra spaces
             if (!_hasAutoFilledPlate && _currentSuspectVehicle != null && _currentSuspectVehicle.Exists())
             {
                 string plate = _currentSuspectVehicle.LicensePlate;
                 if (!string.IsNullOrEmpty(plate))
                 {
                     _vehiclePlateInput.Clear();
-                    _vehiclePlateInput.Append(plate.Trim()); // FIXED: Trim the plate to remove spaces
+                    _vehiclePlateInput.Append(plate.Trim());
                     _hasAutoFilledPlate = true;
                     Game.LogTrivial($"[Computer] Auto-filled vehicle plate: '{plate.Trim()}' (was '{plate}')");
                 }
@@ -571,7 +625,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Freeze/stop audio using native functions
         private void FreezeAudio(bool freeze)
         {
             try
@@ -745,7 +798,7 @@ namespace PersistentWorld.Computer
             _ticketMenuScrollOffset = 0;
             _citationLocation.Clear();
             _showingArrests = false;
-            _showingOwnerPrompt = false; // FIXED: Reset owner prompt flag
+            _showingOwnerPrompt = false;
 
             // Reset vehicle selection
             _availableVehicles.Clear();
@@ -861,9 +914,9 @@ namespace PersistentWorld.Computer
             // Always show owner's vehicle first if available
             if (_currentSelectedPerson != null && string.IsNullOrEmpty(input))
             {
-                string firstName = _currentSelectedPerson["first_name"].ToString();
-                string lastName = _currentSelectedPerson["last_name"].ToString();
-                string ownerName = $"{firstName} {lastName}";
+                string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+                string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+                string ownerName = $"{firstName} {lastName}".Trim();
 
                 // Find vehicles owned by this person
                 var ownerVehicles = _vehicleSuggestionsList.Where(v => v.OwnerName.Equals(ownerName, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -919,7 +972,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Improved input handling with per-key debouncing
         private void HandleInput()
         {
             // Check if enough time has passed since last ANY key press
@@ -953,7 +1005,7 @@ namespace PersistentWorld.Computer
                     else if (_currentScreen == ScreenMode.VehicleDetails)
                     {
                         _currentScreen = ScreenMode.Search;
-                        _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                        _showingOwnerPrompt = false;
                     }
                     else
                     {
@@ -990,7 +1042,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Person details input with debouncing
         private void HandlePersonDetailsInput(ref bool keyProcessed)
         {
             // F6 to issue ticket (keyboard)
@@ -1020,7 +1071,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Vehicle details input - requires extra step to view owner
         private void HandleVehicleDetailsInput(ref bool keyProcessed)
         {
             // F6 to issue ticket (keyboard)
@@ -1033,9 +1083,9 @@ namespace PersistentWorld.Computer
 
                     if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                     {
-                        int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                        string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                        string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+                        int pedId = GetSafeInt(_currentVehicle, "ped_id");
+                        string firstName = GetSafeString(_currentVehicle, "first_name");
+                        string lastName = GetSafeString(_currentVehicle, "last_name");
 
                         if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                         {
@@ -1054,7 +1104,7 @@ namespace PersistentWorld.Computer
                 return;
             }
 
-            // FIXED: Enter now requires TWO presses to go to owner (first shows prompt, second goes)
+            // Enter now requires TWO presses to go to owner (first shows prompt, second goes)
             if (Game.IsKeyDown(Keys.Enter))
             {
                 if (!_lastKeyStates.ContainsKey(Keys.Enter) ||
@@ -1073,9 +1123,9 @@ namespace PersistentWorld.Computer
                         // Second press - go to owner
                         if (_currentVehicle != null && _currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                         {
-                            int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                            string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                            string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+                            int pedId = GetSafeInt(_currentVehicle, "ped_id");
+                            string firstName = GetSafeString(_currentVehicle, "first_name");
+                            string lastName = GetSafeString(_currentVehicle, "last_name");
 
                             if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                             {
@@ -1102,14 +1152,13 @@ namespace PersistentWorld.Computer
                 {
                     _lastKeyStates[Keys.Back] = DateTime.Now;
                     _currentScreen = ScreenMode.Search;
-                    _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                    _showingOwnerPrompt = false;
                     keyProcessed = true;
                 }
                 return;
             }
         }
 
-        // FIXED: Controller input with improved debouncing
         private void HandleControllerInput()
         {
             if ((DateTime.Now - _lastControllerInput).TotalMilliseconds < CONTROLLER_DEBOUNCE_MS)
@@ -1175,7 +1224,7 @@ namespace PersistentWorld.Computer
                     else if (_currentScreen == ScreenMode.VehicleDetails)
                     {
                         _currentScreen = ScreenMode.Search;
-                        _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+                        _showingOwnerPrompt = false;
                     }
                     else if (_currentScreen != ScreenMode.Search)
                     {
@@ -1230,9 +1279,9 @@ namespace PersistentWorld.Computer
                             // Second press - go to owner
                             if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                             {
-                                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+                                int pedId = GetSafeInt(_currentVehicle, "ped_id");
+                                string firstName = GetSafeString(_currentVehicle, "first_name");
+                                string lastName = GetSafeString(_currentVehicle, "last_name");
 
                                 if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                                 {
@@ -1268,9 +1317,9 @@ namespace PersistentWorld.Computer
                     {
                         if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                         {
-                            int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                            string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                            string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+                            int pedId = GetSafeInt(_currentVehicle, "ped_id");
+                            string firstName = GetSafeString(_currentVehicle, "first_name");
+                            string lastName = GetSafeString(_currentVehicle, "last_name");
 
                             if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                             {
@@ -1315,7 +1364,7 @@ namespace PersistentWorld.Computer
                     }
                     else if (_currentScreen == ScreenMode.VehicleDetails && _currentVehicle != null)
                     {
-                        // FIXED: For vehicle details, A button now requires two presses
+                        // For vehicle details, A button now requires two presses
                         if (!_showingOwnerPrompt)
                         {
                             _showingOwnerPrompt = true;
@@ -1325,9 +1374,9 @@ namespace PersistentWorld.Computer
                         {
                             if (_currentVehicle.ContainsKey("ped_id") && _currentVehicle["ped_id"] != null)
                             {
-                                int pedId = Convert.ToInt32(_currentVehicle["ped_id"]);
-                                string firstName = _currentVehicle.ContainsKey("first_name") ? _currentVehicle["first_name"].ToString() : "";
-                                string lastName = _currentVehicle.ContainsKey("last_name") ? _currentVehicle["last_name"].ToString() : "";
+                                int pedId = GetSafeInt(_currentVehicle, "ped_id");
+                                string firstName = GetSafeString(_currentVehicle, "first_name");
+                                string lastName = GetSafeString(_currentVehicle, "last_name");
 
                                 if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                                 {
@@ -1401,7 +1450,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Separated D-Pad navigation handlers
         private void HandleDPadUp()
         {
             if (_currentScreen == ScreenMode.Search)
@@ -1482,7 +1530,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Search input handler with debouncing - E key now ONLY types E
         private void HandleSearchInput(ref bool keyProcessed)
         {
             // Tab key for mode switching (keyboard) - NOT E
@@ -1537,7 +1584,7 @@ namespace PersistentWorld.Computer
                 return;
             }
 
-            // Field switching for Person mode (Up/Down arrows ONLY - NOT E)
+            // Field switching for Person mode (Up/Down arrows - NOT E)
             if (_currentSearchMode == SearchMode.Person && (Game.IsKeyDown(Keys.Up) || Game.IsKeyDown(Keys.Down)))
             {
                 Keys key = Game.IsKeyDown(Keys.Up) ? Keys.Up : Keys.Down;
@@ -1679,7 +1726,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Ticket menu input handler with debouncing
         private void HandleTicketMenuInput(ref bool keyProcessed)
         {
             if (Game.IsKeyDown(Keys.Tab))
@@ -1816,7 +1862,6 @@ namespace PersistentWorld.Computer
             }
         }
 
-        // FIXED: Vehicle selection input handler with debouncing
         private void HandleVehicleSelectionInput(ref bool keyProcessed)
         {
             if (Game.IsKeyDown(Keys.Enter))
@@ -2092,11 +2137,11 @@ namespace PersistentWorld.Computer
             _showSuggestions = false;
             _selectedSuggestionIndex = -1;
             _currentVehicle = null;
-            _showingOwnerPrompt = false; // FIXED: Reset owner prompt
+            _showingOwnerPrompt = false;
 
             if (_currentSearchMode == SearchMode.Vehicle)
             {
-                string plate = _vehiclePlateInput.ToString().Trim(); // FIXED: Trim the plate input
+                string plate = _vehiclePlateInput.ToString().Trim();
                 if (string.IsNullOrEmpty(plate))
                 {
                     _leftColumnResults.Add("~r~Please enter a license plate");
@@ -2113,22 +2158,22 @@ namespace PersistentWorld.Computer
                     _leftColumnResults.Add($"=== VEHICLE RESULTS ===");
 
                     // Vehicle info
-                    string vehicleType = result.ContainsKey("owner_type") ? result["owner_type"].ToString() : "Unknown";
-                    string ownerName = result.ContainsKey("owner_name") ? result["owner_name"].ToString() : "Unknown";
+                    string vehicleType = GetSafeString(result, "owner_type");
+                    string ownerName = GetSafeString(result, "owner_name");
 
-                    _leftColumnResults.Add($"Plate: {result["license_plate"]}");
-                    _leftColumnResults.Add($"Model: {result["vehicle_model"]}");
+                    _leftColumnResults.Add($"Plate: {GetSafeString(result, "license_plate")}");
+                    _leftColumnResults.Add($"Model: {GetSafeString(result, "vehicle_model")}");
 
                     if (result.ContainsKey("color_primary"))
-                        _leftColumnResults.Add($"Color: {result["color_primary"]}/{result["color_secondary"]}");
+                        _leftColumnResults.Add($"Color: {GetSafeString(result, "color_primary")}/{GetSafeString(result, "color_secondary")}");
 
                     _leftColumnResults.Add($"Owner: {ownerName} ({vehicleType})");
 
                     if (result.ContainsKey("company_name") && result["company_name"] != null)
-                        _leftColumnResults.Add($"Company: {result["company_name"]}");
+                        _leftColumnResults.Add($"Company: {GetSafeString(result, "company_name")}");
 
                     // Registration status
-                    if (result.ContainsKey("no_registration") && Convert.ToInt32(result["no_registration"]) == 1)
+                    if (GetSafeInt(result, "no_registration") == 1)
                     {
                         _leftColumnResults.Add($"~r~NO REGISTRATION");
                     }
@@ -2145,7 +2190,7 @@ namespace PersistentWorld.Computer
                     }
 
                     // Insurance status
-                    if (result.ContainsKey("no_insurance") && Convert.ToInt32(result["no_insurance"]) == 1)
+                    if (GetSafeInt(result, "no_insurance") == 1)
                     {
                         _leftColumnResults.Add($"~r~NO INSURANCE");
                     }
@@ -2162,69 +2207,70 @@ namespace PersistentWorld.Computer
                     }
 
                     // Stolen status
-                    if (result.ContainsKey("is_stolen") && Convert.ToInt32(result["is_stolen"]) == 1)
+                    if (GetSafeInt(result, "is_stolen") == 1)
                     {
-                        string stolenReason = result.ContainsKey("stolen_reason") ? result["stolen_reason"].ToString() : "Unknown";
+                        string stolenReason = GetSafeString(result, "stolen_reason");
                         _leftColumnResults.Add($"~r~*** STOLEN VEHICLE ***");
                         _leftColumnResults.Add($"~r~Reason: {stolenReason}");
                     }
 
                     // Impounded status
-                    if (result.ContainsKey("is_impounded") && Convert.ToInt32(result["is_impounded"]) == 1)
+                    if (GetSafeInt(result, "is_impounded") == 1)
                     {
-                        string impoundReason = result.ContainsKey("impounded_reason") ? result["impounded_reason"].ToString() : "Unknown";
-                        string impoundLocation = result.ContainsKey("impounded_location") ? result["impounded_location"].ToString() : "Unknown";
+                        string impoundReason = GetSafeString(result, "impounded_reason");
+                        string impoundLocation = GetSafeString(result, "impounded_location");
                         _leftColumnResults.Add($"~r~*** IMPOUNDED ***");
                         _leftColumnResults.Add($"~r~Reason: {impoundReason}");
                         _leftColumnResults.Add($"~y~Location: {impoundLocation}");
                     }
 
                     // Owner information
-                    if (result.ContainsKey("owner_name") && result["owner_name"] != null)
+                    if (!string.IsNullOrEmpty(ownerName))
                     {
                         _leftColumnResults.Add($"");
                         _leftColumnResults.Add($"=== OWNER INFORMATION ===");
-                        _leftColumnResults.Add($"Name: {result["owner_name"]}");
+                        _leftColumnResults.Add($"Name: {ownerName}");
 
-                        if (result.ContainsKey("home_address") && result["home_address"] != null)
-                            _leftColumnResults.Add($"Address: {result["home_address"]}");
+                        string homeAddress = GetSafeString(result, "home_address");
+                        if (!string.IsNullOrEmpty(homeAddress))
+                            _leftColumnResults.Add($"Address: {homeAddress}");
 
-                        if (result.ContainsKey("license_status") && result["license_status"] != null)
+                        string licenseStatus = GetSafeString(result, "license_status");
+                        if (!string.IsNullOrEmpty(licenseStatus))
                         {
-                            string licenseStatus = result["license_status"].ToString();
                             string statusColor = "~g~";
-                            if (licenseStatus.ToUpper() == "SUSPENDED") statusColor = "~y~";
-                            if (licenseStatus.ToUpper() == "REVOKED") statusColor = "~r~";
-                            if (licenseStatus.ToUpper() == "EXPIRED") statusColor = "~y~";
+                            string statusUpper = licenseStatus.ToUpper();
+                            if (statusUpper == "SUSPENDED") statusColor = "~y~";
+                            if (statusUpper == "REVOKED") statusColor = "~r~";
+                            if (statusUpper == "EXPIRED") statusColor = "~y~";
 
                             _leftColumnResults.Add($"License: {statusColor}{licenseStatus}~w~");
                         }
                     }
 
                     // Check if owner is wanted
-                    if (result.ContainsKey("is_wanted") && Convert.ToBoolean(result["is_wanted"]))
+                    if (GetSafeBool(result, "is_wanted"))
                     {
-                        string wantedReason = result.ContainsKey("wanted_reason") ? result["wanted_reason"].ToString() : "Unknown";
+                        string wantedReason = GetSafeString(result, "wanted_reason");
                         _leftColumnResults.Add($"~r~OWNER IS WANTED: {wantedReason}");
                     }
 
                     // Check if owner is incarcerated
-                    if (result.ContainsKey("is_incarcerated") && Convert.ToBoolean(result["is_incarcerated"]))
+                    if (GetSafeBool(result, "is_incarcerated"))
                     {
                         _leftColumnResults.Add($"~r~OWNER IS INCARCERATED");
                     }
 
-                    // FIXED: Buttons for vehicle lookup - Now shows extra step requirement
                     _leftColumnResults.Add($"");
                     _leftColumnResults.Add($"~g~[A/ENTER] (press twice) View Owner Info");
                     _leftColumnResults.Add($"~y~[Y/F6] Issue Ticket to Owner");
 
                     // Get person info if owner is a person
-                    if (result.ContainsKey("ped_id") && result["ped_id"] != null && Convert.ToInt32(result["ped_id"]) > 0)
+                    if (GetSafeInt(result, "ped_id") > 0)
                     {
-                        int pedId = Convert.ToInt32(result["ped_id"]);
-                        string firstName = result.ContainsKey("first_name") ? result["first_name"].ToString() : "";
-                        string lastName = result.ContainsKey("last_name") ? result["last_name"].ToString() : "";
+                        int pedId = GetSafeInt(result, "ped_id");
+                        string firstName = GetSafeString(result, "first_name");
+                        string lastName = GetSafeString(result, "last_name");
 
                         if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
                         {
@@ -2312,25 +2358,16 @@ namespace PersistentWorld.Computer
                 {
                     if (ticket == null) continue;
 
-                    string date = ticket.ContainsKey("date_issued") && ticket["date_issued"] != null
-                        ? ticket["date_issued"].ToString()
-                        : "Unknown";
+                    string date = GetSafeString(ticket, "date_issued");
+                    if (string.IsNullOrEmpty(date) || date.Length < 10)
+                        date = "Unknown";
+                    else if (date.Length > 10)
+                        date = date.Substring(0, 10);
 
-                    string offense = ticket.ContainsKey("offense") && ticket["offense"] != null
-                        ? ticket["offense"].ToString()
-                        : "Unknown";
-
-                    string fine = ticket.ContainsKey("fine_amount") && ticket["fine_amount"] != null
-                        ? ticket["fine_amount"].ToString()
-                        : "0";
-
-                    string vehicle = ticket.ContainsKey("license_plate") && ticket["license_plate"] != null
-                        ? ticket["license_plate"].ToString()
-                        : "Unknown";
-
-                    string model = ticket.ContainsKey("vehicle_model") && ticket["vehicle_model"] != null
-                        ? ticket["vehicle_model"].ToString()
-                        : "";
+                    string offense = GetSafeString(ticket, "offense");
+                    string fine = GetSafeString(ticket, "fine_amount");
+                    string vehicle = GetSafeString(ticket, "license_plate");
+                    string model = GetSafeString(ticket, "vehicle_model");
 
                     if (offense.Length > 25)
                         offense = offense.Substring(0, 22) + "...";
@@ -2358,158 +2395,193 @@ namespace PersistentWorld.Computer
             if (_lastPersonResults == null || _lastPersonResults.Count == 0 || _selectedResultIndex < 0)
                 return;
 
-            var person = _lastPersonResults[_selectedResultIndex];
-
-            if (person == null) return;
-
-            string firstName = person["first_name"].ToString();
-            string lastName = person["last_name"].ToString();
-
-            Game.LogTrivial($"[Computer] Displaying {firstName} {lastName}");
-
-            // Safely refresh data
             try
             {
-                var freshResults = _database.LookupByName(firstName, lastName);
-                if (freshResults != null && freshResults.Count > 0)
+                var person = _lastPersonResults[_selectedResultIndex];
+
+                if (person == null) return;
+
+                string firstName = GetSafeString(person, "first_name");
+                string lastName = GetSafeString(person, "last_name");
+
+                Game.LogTrivial($"[Computer] Displaying {firstName} {lastName}");
+
+                // Safely refresh data
+                try
                 {
-                    person = freshResults[0];
-                    _lastPersonResults[_selectedResultIndex] = person;
+                    var freshResults = _database.LookupByName(firstName, lastName);
+                    if (freshResults != null && freshResults.Count > 0)
+                    {
+                        person = freshResults[0];
+                        _lastPersonResults[_selectedResultIndex] = person;
+                    }
                 }
+                catch (Exception ex)
+                {
+                    Game.LogTrivial($"[Computer] Error refreshing data: {ex.Message}");
+                }
+
+                _currentSelectedPerson = person;
+
+                _leftColumnResults.Clear();
+
+                string countText = _lastPersonResults.Count > 1 ?
+                    $" (Result {_selectedResultIndex + 1} of {_lastPersonResults.Count})" : "";
+
+                _leftColumnResults.Add($"=== PERSON INFO{countText} ===");
+
+                // SAFE ACCESS WITH NULL CHECKS
+                string safeFirstName = GetSafeString(person, "first_name");
+                string safeLastName = GetSafeString(person, "last_name");
+                string safeAddress = GetSafeString(person, "home_address");
+
+                _leftColumnResults.Add($"Name: {safeFirstName} {safeLastName}");
+                _leftColumnResults.Add($"Address: {safeAddress}");
+
+                // SAFE LICENSE INFO
+                string licenseNum = GetSafeString(person, "license_number");
+                if (string.IsNullOrEmpty(licenseNum)) licenseNum = "None";
+
+                string licenseStatus = GetSafeString(person, "license_status");
+                if (string.IsNullOrEmpty(licenseStatus)) licenseStatus = "Valid";
+
+                string licenseReason = GetSafeString(person, "license_reason");
+                string licenseExpiry = GetSafeString(person, "license_expiry");
+                string licenseClass = GetSafeString(person, "license_class");
+                if (string.IsNullOrEmpty(licenseClass)) licenseClass = "Class C";
+
+                string statusColor = "~g~";
+                string statusUpper = licenseStatus.ToUpper();
+
+                switch (statusUpper)
+                {
+                    case "SUSPENDED": statusColor = "~y~"; break;
+                    case "REVOKED": statusColor = "~r~"; break;
+                    case "EXPIRED": statusColor = "~y~"; break;
+                    case "NOLICENSE":
+                    case "NO LICENSE":
+                    case "NONE":
+                        statusColor = "~r~";
+                        licenseNum = "None";
+                        break;
+                }
+
+                _leftColumnResults.Add($"License: {licenseNum} {statusColor}{statusUpper}~w~");
+                _leftColumnResults.Add($"Class: {licenseClass}");
+
+                if (!string.IsNullOrEmpty(licenseExpiry))
+                {
+                    if (DateTime.TryParse(licenseExpiry, out DateTime expiryDate))
+                    {
+                        if (expiryDate < DateTime.Now)
+                            _leftColumnResults.Add($"License EXPIRED: ~y~{licenseExpiry}~w~");
+                        else
+                            _leftColumnResults.Add($"Expires: {licenseExpiry}");
+                    }
+                    else
+                    {
+                        _leftColumnResults.Add($"Expires: {licenseExpiry}");
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(licenseReason) &&
+                    (statusUpper == "SUSPENDED" || statusUpper == "REVOKED"))
+                {
+                    _leftColumnResults.Add($"Reason: {licenseReason}");
+                }
+
+                // WANTED STATUS
+                bool isWanted = GetSafeBool(person, "is_wanted");
+                if (isWanted)
+                {
+                    string wantedReason = GetSafeString(person, "wanted_reason");
+                    _leftColumnResults.Add($"~r~*** WANTED ***");
+                    _leftColumnResults.Add($"~r~Reason: {wantedReason}");
+
+                    string wantedLastSeen = GetSafeString(person, "wanted_last_seen");
+                    if (!string.IsNullOrEmpty(wantedLastSeen))
+                    {
+                        _leftColumnResults.Add($"~y~Last Seen: {wantedLastSeen}");
+                    }
+                    _leftColumnResults.Add($"");
+                }
+
+                // INCARCERATED STATUS
+                bool isIncarcerated = GetSafeBool(person, "is_incarcerated");
+                if (isIncarcerated)
+                {
+                    string incarceratedReason = GetSafeString(person, "incarcerated_reason");
+                    int days = GetSafeInt(person, "incarcerated_days");
+                    string releaseDate = GetSafeString(person, "release_date");
+
+                    _leftColumnResults.Add($"~r~*** INCARCERATED ***");
+                    _leftColumnResults.Add($"~r~Reason: {incarceratedReason}");
+                    _leftColumnResults.Add($"~y~Sentence: {days} days");
+                    _leftColumnResults.Add($"~y~Release: {releaseDate}");
+                    _leftColumnResults.Add($"");
+                }
+
+                string employerName = GetSafeString(person, "employer_name");
+                string jobTitle = GetSafeString(person, "job_title");
+                if (!string.IsNullOrEmpty(employerName))
+                    _leftColumnResults.Add($"Employer: {employerName} ({jobTitle})");
+
+                // Display owned vehicles with new fields
+                if (person.ContainsKey("owned_vehicles"))
+                {
+                    var vehicles = person["owned_vehicles"] as List<Dictionary<string, object>>;
+                    if (vehicles != null && vehicles.Count > 0)
+                    {
+                        _leftColumnResults.Add($"Vehicles ({vehicles.Count}):");
+                        foreach (var vehicle in vehicles)
+                        {
+                            if (vehicle == null) continue;
+
+                            string plate = GetSafeString(vehicle, "license_plate");
+                            string model = GetSafeString(vehicle, "vehicle_model");
+                            string color1 = GetSafeString(vehicle, "color_primary");
+                            string color2 = GetSafeString(vehicle, "color_secondary");
+
+                            string colorText = string.IsNullOrEmpty(color1) ? "" : $" ({color1}";
+                            colorText += string.IsNullOrEmpty(color2) ? "" : $"/{color2})";
+
+                            _leftColumnResults.Add($"  • {plate}: {model}{colorText}");
+
+                            // Show vehicle status flags
+                            if (GetSafeInt(vehicle, "is_stolen") == 1)
+                                _leftColumnResults.Add($"    ~r~[STOLEN]~w~");
+
+                            if (GetSafeInt(vehicle, "is_impounded") == 1)
+                                _leftColumnResults.Add($"    ~r~[IMPOUNDED]~w~");
+
+                            if (GetSafeInt(vehicle, "no_registration") == 1)
+                                _leftColumnResults.Add($"    ~r~[NO REGISTRATION]~w~");
+
+                            if (GetSafeInt(vehicle, "no_insurance") == 1)
+                                _leftColumnResults.Add($"    ~r~[NO INSURANCE]~w~");
+                        }
+                    }
+                }
+
+                _leftColumnResults.Add($"");
+                _leftColumnResults.Add("~g~[A/ENTER/Y/F6] Issue Ticket");
+
+                // Set current screen to PersonDetails to enable button actions
+                _currentScreen = ScreenMode.PersonDetails;
+
+                LoadCitationHistory(person);
+
+                _activePersonField = PersonField.FirstName;
+
+                // Log the values for debugging
+                Game.LogTrivial($"[Computer] License Status: '{licenseStatus}', Upper: '{statusUpper}'");
             }
             catch (Exception ex)
             {
-                Game.LogTrivial($"[Computer] Error refreshing data: {ex.Message}");
+                Game.LogTrivial($"[Computer] CRITICAL ERROR in DisplaySelectedPerson: {ex.Message}");
+                Game.LogTrivial($"[Computer] Stack trace: {ex.StackTrace}");
+                _leftColumnResults.Add($"~r~Error displaying person: {ex.Message}");
             }
-
-            _currentSelectedPerson = person;
-
-            _leftColumnResults.Clear();
-
-            string countText = _lastPersonResults.Count > 1 ?
-                $" (Result {_selectedResultIndex + 1} of {_lastPersonResults.Count})" : "";
-
-            _leftColumnResults.Add($"=== PERSON INFO{countText} ===");
-            _leftColumnResults.Add($"Name: {person["first_name"]} {person["last_name"]}");
-            _leftColumnResults.Add($"Address: {person["home_address"]}");
-
-            // License info from peds table
-            string licenseNum = person.ContainsKey("license_number") ? person["license_number"].ToString() : "None";
-            string licenseStatus = person.ContainsKey("license_status") ? person["license_status"].ToString() : "Valid";
-            string licenseReason = person.ContainsKey("license_reason") ? person["license_reason"].ToString() : "";
-            string licenseExpiry = person.ContainsKey("license_expiry") ? person["license_expiry"].ToString() : "";
-            string licenseClass = person.ContainsKey("license_class") ? person["license_class"].ToString() : "Class C";
-
-            string statusColor = "~g~";
-            switch (licenseStatus.ToUpper())
-            {
-                case "SUSPENDED": statusColor = "~y~"; break;
-                case "REVOKED": statusColor = "~r~"; break;
-                case "EXPIRED": statusColor = "~y~"; break;
-                case "NOLICENSE": case "NO LICENSE": statusColor = "~r~"; break;
-            }
-
-            _leftColumnResults.Add($"License: {licenseNum} {statusColor}{licenseStatus.ToUpper()}~w~");
-            _leftColumnResults.Add($"Class: {licenseClass}");
-
-            if (!string.IsNullOrEmpty(licenseExpiry))
-            {
-                if (DateTime.TryParse(licenseExpiry, out DateTime expiryDate))
-                {
-                    if (expiryDate < DateTime.Now)
-                        _leftColumnResults.Add($"License EXPIRED: ~y~{licenseExpiry}~w~");
-                    else
-                        _leftColumnResults.Add($"Expires: {licenseExpiry}");
-                }
-                else
-                {
-                    _leftColumnResults.Add($"Expires: {licenseExpiry}");
-                }
-            }
-
-            if (!string.IsNullOrEmpty(licenseReason) &&
-                (licenseStatus.ToUpper() == "SUSPENDED" || licenseStatus.ToUpper() == "REVOKED"))
-            {
-                _leftColumnResults.Add($"Reason: {licenseReason}");
-            }
-
-            // WANTED STATUS
-            bool isWanted = person.ContainsKey("is_wanted") ? Convert.ToBoolean(person["is_wanted"]) : false;
-            if (isWanted)
-            {
-                string wantedReason = person.ContainsKey("wanted_reason") ? person["wanted_reason"].ToString() : "Unknown";
-                _leftColumnResults.Add($"~r~*** WANTED ***");
-                _leftColumnResults.Add($"~r~Reason: {wantedReason}");
-
-                if (person.ContainsKey("wanted_last_seen") && person["wanted_last_seen"] != null && person["wanted_last_seen"].ToString() != "")
-                {
-                    _leftColumnResults.Add($"~y~Last Seen: {person["wanted_last_seen"]}");
-                }
-                _leftColumnResults.Add($"");
-            }
-
-            // INCARCERATED STATUS
-            bool isIncarcerated = person.ContainsKey("is_incarcerated") ? Convert.ToBoolean(person["is_incarcerated"]) : false;
-            if (isIncarcerated)
-            {
-                string incarceratedReason = person.ContainsKey("incarcerated_reason") ? person["incarcerated_reason"].ToString() : "Unknown";
-                int days = person.ContainsKey("incarcerated_days") ? Convert.ToInt32(person["incarcerated_days"]) : 0;
-                string releaseDate = person.ContainsKey("release_date") ? person["release_date"].ToString() : "Unknown";
-
-                _leftColumnResults.Add($"~r~*** INCARCERATED ***");
-                _leftColumnResults.Add($"~r~Reason: {incarceratedReason}");
-                _leftColumnResults.Add($"~y~Sentence: {days} days");
-                _leftColumnResults.Add($"~y~Release: {releaseDate}");
-                _leftColumnResults.Add($"");
-            }
-
-            if (person.ContainsKey("employer_name") && person["employer_name"] != null && person["employer_name"].ToString() != "")
-                _leftColumnResults.Add($"Employer: {person["employer_name"]} ({person["job_title"]})");
-
-            // Display owned vehicles with new fields
-            if (person.ContainsKey("owned_vehicles"))
-            {
-                var vehicles = person["owned_vehicles"] as List<Dictionary<string, object>>;
-                if (vehicles != null && vehicles.Count > 0)
-                {
-                    _leftColumnResults.Add($"Vehicles ({vehicles.Count}):");
-                    foreach (var vehicle in vehicles)
-                    {
-                        string plate = vehicle.ContainsKey("license_plate") ? vehicle["license_plate"].ToString() : "No Plate";
-                        string model = vehicle.ContainsKey("vehicle_model") ? vehicle["vehicle_model"].ToString() : "Unknown";
-                        string color1 = vehicle.ContainsKey("color_primary") ? vehicle["color_primary"].ToString() : "";
-                        string color2 = vehicle.ContainsKey("color_secondary") ? vehicle["color_secondary"].ToString() : "";
-
-                        string colorText = string.IsNullOrEmpty(color1) ? "" : $" ({color1}";
-                        colorText += string.IsNullOrEmpty(color2) ? "" : $"/{color2})";
-
-                        _leftColumnResults.Add($"  • {plate}: {model}{colorText}");
-
-                        // Show vehicle status flags
-                        if (vehicle.ContainsKey("is_stolen") && Convert.ToInt32(vehicle["is_stolen"]) == 1)
-                            _leftColumnResults.Add($"    ~r~[STOLEN]~w~");
-
-                        if (vehicle.ContainsKey("is_impounded") && Convert.ToInt32(vehicle["is_impounded"]) == 1)
-                            _leftColumnResults.Add($"    ~r~[IMPOUNDED]~w~");
-
-                        if (vehicle.ContainsKey("no_registration") && Convert.ToInt32(vehicle["no_registration"]) == 1)
-                            _leftColumnResults.Add($"    ~r~[NO REGISTRATION]~w~");
-
-                        if (vehicle.ContainsKey("no_insurance") && Convert.ToInt32(vehicle["no_insurance"]) == 1)
-                            _leftColumnResults.Add($"    ~r~[NO INSURANCE]~w~");
-                    }
-                }
-            }
-
-            _leftColumnResults.Add($"");
-            _leftColumnResults.Add("~g~[A/ENTER/Y/F6] Issue Ticket");
-
-            // Set current screen to PersonDetails to enable button actions
-            _currentScreen = ScreenMode.PersonDetails;
-
-            LoadCitationHistory(person);
-
-            _activePersonField = PersonField.FirstName;
         }
 
         private void OpenTicketMenu()
@@ -2524,7 +2596,9 @@ namespace PersistentWorld.Computer
             _citationLocation.Clear();
             _showingArrests = false;
 
-            Game.DisplayNotification($"Select charge for {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}");
+            string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+            string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+            Game.DisplayNotification($"Select charge for {firstName} {lastName}");
         }
 
         private void OpenVehicleSelection()
@@ -2537,7 +2611,9 @@ namespace PersistentWorld.Computer
             UpdateVehicleSuggestions();
             _selectedVehicleSuggestionIndex = _vehicleSuggestions.Count > 0 ? 0 : -1;
 
-            Game.DisplayNotification($"Select vehicle for {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}");
+            string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+            string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+            Game.DisplayNotification($"Select vehicle for {firstName} {lastName}");
         }
 
         private void IssueSelectedTicketWithVehicle()
@@ -2560,8 +2636,10 @@ namespace PersistentWorld.Computer
                 location = "Los Santos";
             }
 
-            int pedId = Convert.ToInt32(_currentSelectedPerson["id"]);
-            string personName = $"{_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}";
+            int pedId = GetSafeInt(_currentSelectedPerson, "id");
+            string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+            string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+            string personName = $"{firstName} {lastName}".Trim();
 
             // Get vehicle ID (use 1 as fallback if no vehicle selected)
             int vehicleId = 1;
@@ -2569,8 +2647,8 @@ namespace PersistentWorld.Computer
 
             if (_selectedVehicle != null && _selectedVehicle.ContainsKey("id"))
             {
-                vehicleId = Convert.ToInt32(_selectedVehicle["id"]);
-                vehicleInfo = _selectedVehicle["license_plate"].ToString();
+                vehicleId = GetSafeInt(_selectedVehicle, "id");
+                vehicleInfo = GetSafeString(_selectedVehicle, "license_plate");
                 Game.LogTrivial($"[Computer] Issuing ticket with vehicle: {vehicleInfo} (ID: {vehicleId})");
             }
             else
@@ -2722,7 +2800,7 @@ namespace PersistentWorld.Computer
                 }
             }
 
-            // FIXED: Show prompt if waiting for second press
+            // Show prompt if waiting for second press
             if (_showingOwnerPrompt)
             {
                 DrawText(centerX, 0.8f, "Press again to view owner", 0.4f, 255, 255, 0, 255, true);
@@ -2914,7 +2992,9 @@ namespace PersistentWorld.Computer
 
             if (_currentSelectedPerson != null)
             {
-                DrawText(centerX - 0.3f, yPos, $"Issuing to: {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}", 0.5f, 255, 255, 0, 255, false);
+                string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+                string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+                DrawText(centerX - 0.3f, yPos, $"Issuing to: {firstName} {lastName}", 0.5f, 255, 255, 0, 255, false);
                 yPos += 0.05f;
             }
 
@@ -2973,7 +3053,9 @@ namespace PersistentWorld.Computer
 
             if (_currentSelectedPerson != null)
             {
-                DrawText(centerX - 0.3f, yPos, $"Select vehicle for: {_currentSelectedPerson["first_name"]} {_currentSelectedPerson["last_name"]}", 0.5f, 255, 255, 0, 255, false);
+                string firstName = GetSafeString(_currentSelectedPerson, "first_name");
+                string lastName = GetSafeString(_currentSelectedPerson, "last_name");
+                DrawText(centerX - 0.3f, yPos, $"Select vehicle for: {firstName} {lastName}", 0.5f, 255, 255, 0, 255, false);
                 yPos += 0.05f;
             }
 
@@ -3016,7 +3098,8 @@ namespace PersistentWorld.Computer
             // Show selection hint
             if (_selectedVehicle != null)
             {
-                DrawText(centerX - 0.28f, yPos + 0.03f, $"Selected: {_selectedVehicle["license_plate"]}", 0.35f, 0, 255, 0, 255, false);
+                string plate = GetSafeString(_selectedVehicle, "license_plate");
+                DrawText(centerX - 0.28f, yPos + 0.03f, $"Selected: {plate}", 0.35f, 0, 255, 0, 255, false);
             }
 
             float footerY = 0.88f;
