@@ -10,3 +10,13 @@ C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\System.Data.SQLite.xml
 C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorld.csproj.CopyComplete
 C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorld.dll
 C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorld.pdb
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\bin\Debug\PersistentWorld.dll
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\bin\Debug\PersistentWorld.pdb
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\bin\Debug\System.Data.SQLite.dll
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\bin\Debug\Microsoft.VisualStudio.QualityTools.UnitTestFramework.dll
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\bin\Debug\System.Data.SQLite.xml
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\obj\Debug\PersistentWorld.csproj.AssemblyReference.cache
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\obj\Debug\PersistentWorld.csproj.CoreCompileInputs.cache
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\obj\Debug\PersistentWorld.csproj.CopyComplete
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\obj\Debug\PersistentWorld.dll
+C:\Users\Matt\Source\Repos\1803creations\Remembrance-PersistentWorld-\PersistantWorld\obj\Debug\PersistentWorld.pdb

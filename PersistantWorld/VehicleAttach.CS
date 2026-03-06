@@ -28,13 +28,17 @@ namespace PersistentWorld.Vehicles
         public int NameCacheMinutes { get; set; } = 30;
         public int MaxQueueSize { get; set; } = 100;
         public int VehicleProcessCooldownSeconds { get; set; } = 30;
-        public int NameProtectionIntervalMs { get; set; } = 3000; // Check every 3 seconds
+        public int NameProtectionIntervalMs { get; set; } = 3000;
         public bool AutoGenerateNamesForDuplicates { get; set; } = true;
         public string DefaultFirstName { get; set; } = "John";
         public string DefaultLastName { get; set; } = "Doe";
         public int NameForceAttempts { get; set; } = 3;
-        public bool EnableGenderCorrection { get; set; } = true; // NEW: Enable gender correction
-        public bool ChangePedModelToMatchGender { get; set; } = true; // NEW: Change ped model to match gender
+        public bool EnableGenderCorrection { get; set; } = true;
+        public bool ChangePedModelToMatchGender { get; set; } = true;
+        public bool EnableFleetVehicles { get; set; } = true;
+        public bool EnableIncarcerationReplacement { get; set; } = true;
+        public bool UseDatabaseNamesForStolenVehicles { get; set; } = true;
+        public int MaxStolenVehicleNameAttempts { get; set; } = 3;
 
         public static VehicleAttachConfig Load(string path)
         {
@@ -73,11 +77,39 @@ namespace PersistentWorld.Vehicles
         }
     }
 
+    // XML Classes for Fleet Models
+    [XmlRoot("FleetModels")]
+    public class FleetModelCollection
+    {
+        [XmlElement("Model")]
+        public List<FleetModelEntry> Models { get; set; } = new List<FleetModelEntry>();
+    }
+
+    public class FleetModelEntry
+    {
+        [XmlAttribute("model")]
+        public string Model { get; set; }
+
+        [XmlAttribute("company")]
+        public string Company { get; set; }
+    }
+
+    // Class to track fleet vehicle assignments
+    public class FleetVehicleAssignment
+    {
+        public string Plate { get; set; }
+        public string Model { get; set; }
+        public string Company { get; set; }
+        public int VehicleId { get; set; }
+        public DateTime AssignedAt { get; set; }
+    }
+
     public class VehicleAttach
     {
         private DatabaseManager _database;
         private VehicleAttachConfig _config;
         private string _configPath;
+        private string _databasePath;
         private DateTime _lastScan = DateTime.MinValue;
         private DateTime _lastNameProtectionCheck = DateTime.MinValue;
         private bool _isEnabled = true;
@@ -87,7 +119,10 @@ namespace PersistentWorld.Vehicles
         private int _duplicateNamesFixed = 0;
         private int _nameForceSuccess = 0;
         private int _nameForceFailures = 0;
-        private int _genderCorrections = 0; // NEW: Track gender corrections
+        private int _genderCorrections = 0;
+        private int _incarceratedReplaced = 0;
+        private int _stolenVehiclesProcessed = 0;
+        private int _fleetVehiclesProcessed = 0;
 
         // Threading
         private Thread _dbThread;
@@ -124,6 +159,22 @@ namespace PersistentWorld.Vehicles
         private Dictionary<string, ProtectedPlate> _protectedPlates = new Dictionary<string, ProtectedPlate>();
         private readonly object _protectedPlatesLock = new object();
 
+        // FLEET VEHICLE TRACKING
+        private Dictionary<string, string> _fleetModelToCompany = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _fleetModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private DateTime _lastFleetXmlLoad = DateTime.MinValue;
+        private const int FLEET_XML_RELOAD_MINUTES = 5;
+        private string _fleetXmlPath;
+
+        // Track active fleet vehicle assignments
+        private Dictionary<string, FleetVehicleAssignment> _activeFleetAssignments = new Dictionary<string, FleetVehicleAssignment>();
+        private readonly object _fleetLock = new object();
+
+        // Cache of available fleet plates per model
+        private Dictionary<string, List<string>> _availableFleetPlates = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        private DateTime _lastFleetPlateLoad = DateTime.MinValue;
+        private const int FLEET_PLATE_RELOAD_MINUTES = 10;
+
         // Track used names to detect duplicates
         private Dictionary<string, Ped> _usedNames = new Dictionary<string, Ped>();
         private readonly object _usedNamesLock = new object();
@@ -146,7 +197,7 @@ namespace PersistentWorld.Vehicles
             "Lisa", "Nancy", "Betty", "Helen", "Sandra", "Donna", "Carol", "Ruth", "Sharon", "Michelle",
             "George", "Brian", "Edward", "Ronald", "Timothy", "Jason", "Jeffrey", "Ryan", "Jacob", "Gary",
             "Laura", "Sarah", "Kimberly", "Deborah", "Melissa", "Stephanie", "Rebecca", "Shirley", "Cynthia", "Kathleen",
-            "Ashley", "Jessica", "Amanda", "Brittany", "Courtney", "Heather", "Megan", "Nicole", "Rachel", "Danielle" // Added more female names
+            "Ashley", "Jessica", "Amanda", "Brittany", "Courtney", "Heather", "Megan", "Nicole", "Rachel", "Danielle"
         };
 
         private List<string> _availableLastNames = new List<string>
@@ -158,7 +209,7 @@ namespace PersistentWorld.Vehicles
             "Baker", "Hall", "Rivera", "Campbell", "Mitchell", "Carter", "Roberts", "Gomez", "Phillips", "Evans"
         };
 
-        // NEW: Common male and female first names for gender detection
+        // Common male and female first names for gender detection
         private HashSet<string> _maleFirstNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "james", "john", "robert", "michael", "william", "david", "richard", "joseph", "thomas", "charles",
@@ -177,7 +228,7 @@ namespace PersistentWorld.Vehicles
             "amy", "angela", "emily", "katherine", "virginia", "kelly", "lauren", "christine", "tiffany", "denise"
         };
 
-        // NEW: Common male and female ped models
+        // Common male and female ped models
         private Dictionary<string, string> _malePedModels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "player_zero", "player_zero" },
@@ -401,7 +452,6 @@ namespace PersistentWorld.Vehicles
         private int _totalVehiclesScanned = 0;
         private int _totalNamesFound = 0;
         private int _totalDatabaseMatches = 0;
-        private int _totalNameMismatches = 0;
         private int _cacheHits = 0;
         private int _cacheMisses = 0;
         private int _queueFullCount = 0;
@@ -437,7 +487,8 @@ namespace PersistentWorld.Vehicles
             public DateTime LastForceTime { get; set; }
             public Ped CurrentDriver { get; set; }
             public Vehicle CurrentVehicle { get; set; }
-            public string ExpectedGender { get; set; } // NEW: Store expected gender as string
+            public string ExpectedGender { get; set; }
+            public bool IsStolenVehicle { get; set; }  // New flag for stolen vehicles
         }
 
         // Cached person data
@@ -447,7 +498,7 @@ namespace PersistentWorld.Vehicles
             public string AssignedPlate { get; set; }
             public string FullName { get; set; }
             public DateTime CachedAt { get; set; }
-            public string DetectedGender { get; set; } // NEW: Store detected gender as string
+            public string DetectedGender { get; set; }
         }
 
         // Name protection action to be processed on main thread
@@ -461,7 +512,7 @@ namespace PersistentWorld.Vehicles
             public string OriginalPlate { get; set; }
             public int AttemptCount { get; set; }
             public ActionType Action { get; set; }
-            public string TargetGender { get; set; } // NEW: Target gender for this name as string
+            public string TargetGender { get; set; }
 
             public enum ActionType
             {
@@ -473,29 +524,217 @@ namespace PersistentWorld.Vehicles
 
         public VehicleAttach(DatabaseManager database)
         {
-            _database = database;
-            LoadConfiguration();
-
-            // Start background thread
-            _isThreadRunning = true;
-            _dbThread = new Thread(DatabaseWorker)
+            try
             {
-                IsBackground = true,
-                Name = "VehicleAttachDBThread",
-                Priority = ThreadPriority.BelowNormal
-            };
-            _dbThread.Start();
+                _database = database;
 
-            Game.LogTrivial("[VehicleAttach] ========================================");
-            Game.LogTrivial("[VehicleAttach] Initialized - DEBUG MODE ENABLED");
-            Game.LogTrivial("[VehicleAttach] VerboseDebugging = TRUE");
-            Game.LogTrivial("[VehicleAttach] Name caching enabled - 30 minute expiry");
-            Game.LogTrivial("[VehicleAttach] PLATE PROTECTION ENABLED - Protecting plates, not peds");
-            Game.LogTrivial("[VehicleAttach] GENDER CORRECTION ENABLED - Will fix gender mismatches"); // NEW
-            Game.LogTrivial("[VehicleAttach] DUPLICATE DETECTION ENABLED - Will fix duplicate names");
-            Game.LogTrivial("[VehicleAttach] PERMANENT PLATE TRACKING - Plates only changed once");
-            Game.LogTrivial("[VehicleAttach] ========================================");
+                // Store database path for creating fresh connections
+                string gtaPath = AppDomain.CurrentDomain.BaseDirectory;
+                _databasePath = Path.Combine(gtaPath, "Plugins", "LSPDFR", "PersistentWorld", "PersistentWorld.db");
+
+                LoadConfiguration();
+
+                // Set up fleet XML path
+                _fleetXmlPath = Path.Combine(gtaPath, "Plugins", "LSPDFR", "PersistentWorld", "persistentworldfleet.xml");
+
+                // Start background thread
+                _isThreadRunning = true;
+                _dbThread = new Thread(DatabaseWorker)
+                {
+                    IsBackground = true,
+                    Name = "VehicleAttachDBThread",
+                    Priority = ThreadPriority.BelowNormal
+                };
+                _dbThread.Start();
+
+                Game.LogTrivial("[VehicleAttach] ========================================");
+                Game.LogTrivial("[VehicleAttach] Initialized");
+                if (_config.EnableFleetVehicles)
+                    Game.LogTrivial("[VehicleAttach] FLEET VEHICLE SYSTEM ENABLED");
+                if (_config.EnableIncarcerationReplacement)
+                    Game.LogTrivial("[VehicleAttach] INCARCERATION REPLACEMENT ENABLED");
+                if (_config.UseDatabaseNamesForStolenVehicles)
+                    Game.LogTrivial("[VehicleAttach] STOLEN VEHICLE DB NAME SYSTEM ENABLED");
+                Game.LogTrivial("[VehicleAttach] ========================================");
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[VehicleAttach] CRITICAL ERROR IN CONSTRUCTOR: {ex.Message}");
+                Game.LogTrivial($"[VehicleAttach] Stack trace: {ex.StackTrace}");
+            }
         }
+
+        // ==================== SAFE CONVERSION METHODS ====================
+
+        private int SafeConvertToInt(object value, int defaultValue = 0)
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                if (value is int)
+                    return (int)value;
+
+                if (value is long)
+                    return (int)(long)value;
+
+                if (value is short)
+                    return (short)value;
+
+                if (value is byte)
+                    return (byte)value;
+
+                if (value is string)
+                {
+                    if (int.TryParse((string)value, out int result))
+                        return result;
+                }
+
+                return Convert.ToInt32(value);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        private long SafeConvertToLong(object value, long defaultValue = 0)
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                if (value is long)
+                    return (long)value;
+
+                if (value is int)
+                    return (int)value;
+
+                if (value is string)
+                {
+                    if (long.TryParse((string)value, out long result))
+                        return result;
+                }
+
+                return Convert.ToInt64(value);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        private bool SafeConvertToBool(object value, bool defaultValue = false)
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                if (value is bool)
+                    return (bool)value;
+
+                if (value is int)
+                    return (int)value == 1;
+
+                if (value is long)
+                    return (long)value == 1;
+
+                if (value is short)
+                    return (short)value == 1;
+
+                if (value is byte)
+                    return (byte)value == 1;
+
+                if (value is string)
+                {
+                    string str = ((string)value).ToLower().Trim();
+                    if (str == "true" || str == "yes" || str == "1" || str == "y")
+                        return true;
+                    if (str == "false" || str == "no" || str == "0" || str == "n")
+                        return false;
+                }
+
+                return defaultValue;
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        private string SafeConvertToString(object value, string defaultValue = "")
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                return value.ToString();
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        private DateTime SafeConvertToDateTime(object value, DateTime defaultValue)
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                if (value is DateTime)
+                    return (DateTime)value;
+
+                if (value is string)
+                {
+                    if (DateTime.TryParse((string)value, out DateTime result))
+                        return result;
+                }
+
+                return Convert.ToDateTime(value);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        private decimal SafeConvertToDecimal(object value, decimal defaultValue = 0)
+        {
+            try
+            {
+                if (value == null || value == DBNull.Value)
+                    return defaultValue;
+
+                if (value is decimal)
+                    return (decimal)value;
+
+                if (value is double)
+                    return (decimal)(double)value;
+
+                if (value is float)
+                    return (decimal)(float)value;
+
+                if (value is string)
+                {
+                    if (decimal.TryParse((string)value, out decimal result))
+                        return result;
+                }
+
+                return Convert.ToDecimal(value);
+            }
+            catch
+            {
+                return defaultValue;
+            }
+        }
+
+        // ==================== END SAFE CONVERSION METHODS ====================
 
         private void LoadConfiguration()
         {
@@ -524,6 +763,514 @@ namespace PersistentWorld.Vehicles
         {
             if (_config.VerboseDebugging)
                 Game.LogTrivial($"[VehicleAttach] {message}");
+        }
+
+        // Create a fresh database connection
+        private SQLiteConnection CreateFreshConnection()
+        {
+            try
+            {
+                string connectionString = $"Data Source={_databasePath};Version=3;";
+                var connection = new SQLiteConnection(connectionString);
+                connection.Open();
+                return connection;
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error creating fresh connection: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Check if a vehicle is stolen
+        private bool IsVehicleStolen(Dictionary<string, object> vehicleData)
+        {
+            try
+            {
+                if (vehicleData == null) return false;
+
+                if (vehicleData.ContainsKey("is_stolen") && vehicleData["is_stolen"] != null)
+                {
+                    return SafeConvertToBool(vehicleData["is_stolen"]);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error checking stolen status: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        // Check if a person is incarcerated
+        private bool IsPersonIncarcerated(Dictionary<string, object> person)
+        {
+            try
+            {
+                if (person == null) return false;
+
+                if (person.ContainsKey("is_incarcerated"))
+                {
+                    return SafeConvertToBool(person["is_incarcerated"]);
+                }
+
+                if (person.ContainsKey("incarcerated"))
+                {
+                    return SafeConvertToBool(person["incarcerated"]);
+                }
+
+                if (person.ContainsKey("incarcerated_days"))
+                {
+                    return SafeConvertToInt(person["incarcerated_days"]) > 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error checking incarceration status: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        // Get a random non-incarcerated person from database
+        private Dictionary<string, object> GetRandomNonIncarceratedPersonFromDB()
+        {
+            try
+            {
+                using (var connection = CreateFreshConnection())
+                {
+                    if (connection == null)
+                    {
+                        DebugLog("Failed to create connection for random person query");
+                        return null;
+                    }
+
+                    string query = @"
+                        SELECT p.first_name, p.last_name, p.gender, p.model_name, p.is_incarcerated,
+                               v.license_plate 
+                        FROM persons p 
+                        LEFT JOIN vehicles v ON p.id = v.owner_id 
+                        WHERE p.is_incarcerated = 0 
+                          AND p.first_name IS NOT NULL 
+                          AND p.first_name != '' 
+                          AND p.last_name IS NOT NULL 
+                          AND p.last_name != ''
+                        ORDER BY RANDOM() 
+                        LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        if (reader.Read())
+                        {
+                            var person = new Dictionary<string, object>();
+                            person["first_name"] = SafeConvertToString(reader["first_name"]);
+                            person["last_name"] = SafeConvertToString(reader["last_name"]);
+                            person["gender"] = SafeConvertToString(reader["gender"]);
+                            person["model_name"] = SafeConvertToString(reader["model_name"]);
+                            person["is_incarcerated"] = SafeConvertToBool(reader["is_incarcerated"]);
+
+                            // Create a simple vehicle list for compatibility
+                            var vehicles = new List<Dictionary<string, object>>();
+                            var vehicle = new Dictionary<string, object>();
+                            vehicle["license_plate"] = SafeConvertToString(reader["license_plate"]);
+                            vehicles.Add(vehicle);
+                            person["owned_vehicles"] = vehicles;
+
+                            DebugLog($"Found random non-incarcerated person: {person["first_name"]} {person["last_name"]}");
+                            return person;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error getting random person from DB: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        // Get person from database excluding current person
+        private Dictionary<string, object> GetRandomPersonExcludingCurrent(Dictionary<string, object> currentPerson)
+        {
+            try
+            {
+                string currentFirstName = SafeConvertToString(currentPerson.ContainsKey("first_name") ? currentPerson["first_name"] : null);
+                string currentLastName = SafeConvertToString(currentPerson.ContainsKey("last_name") ? currentPerson["last_name"] : null);
+
+                using (var connection = CreateFreshConnection())
+                {
+                    if (connection == null) return null;
+
+                    string query = @"
+                        SELECT first_name, last_name, gender, model_name, is_incarcerated
+                        FROM persons 
+                        WHERE NOT (first_name = @firstName AND last_name = @lastName)
+                          AND first_name IS NOT NULL 
+                          AND first_name != '' 
+                          AND last_name IS NOT NULL 
+                          AND last_name != ''
+                          AND is_incarcerated = 0
+                        ORDER BY RANDOM() 
+                        LIMIT 1";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@firstName", currentFirstName ?? "");
+                        cmd.Parameters.AddWithValue("@lastName", currentLastName ?? "");
+
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                var person = new Dictionary<string, object>();
+                                person["first_name"] = SafeConvertToString(reader["first_name"]);
+                                person["last_name"] = SafeConvertToString(reader["last_name"]);
+                                person["gender"] = SafeConvertToString(reader["gender"]);
+                                person["model_name"] = SafeConvertToString(reader["model_name"]);
+                                person["is_incarcerated"] = SafeConvertToBool(reader["is_incarcerated"]);
+
+                                DebugLog($"Found alternative person excluding {currentFirstName} {currentLastName}: {person["first_name"]} {person["last_name"]}");
+                                return person;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error getting alternative person: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        // Get all names from database
+        private List<Tuple<string, string>> GetAllNamesFromDatabase()
+        {
+            var names = new List<Tuple<string, string>>();
+
+            try
+            {
+                using (var connection = CreateFreshConnection())
+                {
+                    if (connection == null) return names;
+
+                    string query = @"
+                        SELECT DISTINCT first_name, last_name 
+                        FROM persons 
+                        WHERE first_name IS NOT NULL 
+                          AND first_name != '' 
+                          AND last_name IS NOT NULL 
+                          AND last_name != ''
+                        LIMIT 1000";
+
+                    using (var cmd = new SQLiteCommand(query, connection))
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            string firstName = SafeConvertToString(reader["first_name"]);
+                            string lastName = SafeConvertToString(reader["last_name"]);
+
+                            if (!string.IsNullOrEmpty(firstName) && !string.IsNullOrEmpty(lastName))
+                            {
+                                names.Add(new Tuple<string, string>(firstName, lastName));
+                            }
+                        }
+                    }
+                }
+
+                DebugLog($"Loaded {names.Count} unique names from database");
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error loading names from database: {ex.Message}");
+            }
+
+            return names;
+        }
+
+        // Get a random non-incarcerated person of specific gender (fallback)
+        private Dictionary<string, object> GetRandomNonIncarceratedPersonOfGender(string gender)
+        {
+            try
+            {
+                if (!_config.EnableIncarcerationReplacement)
+                    return null;
+
+                Random rand = new Random();
+
+                for (int attempt = 0; attempt < 20; attempt++)
+                {
+                    string firstName = _availableFirstNames[rand.Next(_availableFirstNames.Count)];
+                    string lastName = _availableLastNames[rand.Next(_availableLastNames.Count)];
+                    string nameGender = DetectGenderFromName(firstName);
+
+                    if (gender == "Unknown" || nameGender == gender)
+                    {
+                        DebugLog($"Creating new synthetic person: {firstName} {lastName}");
+
+                        return new Dictionary<string, object>
+                        {
+                            ["first_name"] = firstName,
+                            ["last_name"] = lastName,
+                            ["gender"] = nameGender,
+                            ["model_name"] = GetRandomPedModelForGender(nameGender),
+                            ["license_status"] = "Valid",
+                            ["owned_vehicles"] = new List<Dictionary<string, object>>
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["license_plate"] = GenerateRandomSAPlate()
+                                }
+                            }
+                        };
+                    }
+                }
+
+                string fallbackFirstName = _availableFirstNames[rand.Next(_availableFirstNames.Count)];
+                string fallbackLastName = _availableLastNames[rand.Next(_availableLastNames.Count)];
+                string fallbackGender = DetectGenderFromName(fallbackFirstName);
+
+                DebugLog($"Creating fallback synthetic person: {fallbackFirstName} {fallbackLastName}");
+
+                return new Dictionary<string, object>
+                {
+                    ["first_name"] = fallbackFirstName,
+                    ["last_name"] = fallbackLastName,
+                    ["gender"] = fallbackGender,
+                    ["model_name"] = GetRandomPedModelForGender(fallbackGender),
+                    ["license_status"] = "Valid",
+                    ["owned_vehicles"] = new List<Dictionary<string, object>>
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["license_plate"] = GenerateRandomSAPlate()
+                        }
+                    }
+                };
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error getting random non-incarcerated person: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Load fleet XML
+        private void LoadFleetXml()
+        {
+            try
+            {
+                if (!_config.EnableFleetVehicles) return;
+
+                if ((DateTime.Now - _lastFleetXmlLoad).TotalMinutes < FLEET_XML_RELOAD_MINUTES)
+                    return;
+
+                if (!File.Exists(_fleetXmlPath))
+                {
+                    CreateDefaultFleetXml();
+                    return;
+                }
+
+                var serializer = new XmlSerializer(typeof(FleetModelCollection));
+                using (var reader = new StreamReader(_fleetXmlPath))
+                {
+                    var fleetData = (FleetModelCollection)serializer.Deserialize(reader);
+
+                    lock (_fleetModelToCompany)
+                    {
+                        _fleetModelToCompany.Clear();
+                        _fleetModels.Clear();
+
+                        foreach (var entry in fleetData.Models)
+                        {
+                            if (!string.IsNullOrEmpty(entry.Model) && !string.IsNullOrEmpty(entry.Company))
+                            {
+                                string modelLower = entry.Model.ToLower();
+                                _fleetModelToCompany[modelLower] = entry.Company;
+                                _fleetModels.Add(modelLower);
+                                DebugLog($"[Fleet] Loaded: {entry.Model} -> {entry.Company}");
+                            }
+                        }
+                    }
+
+                    _lastFleetXmlLoad = DateTime.Now;
+                    Log($"[Fleet] Loaded {_fleetModelToCompany.Count} fleet model definitions");
+
+                    LoadAvailableFleetPlates();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[Fleet] Error loading fleet XML: {ex.Message}");
+            }
+        }
+
+        // Create default fleet XML
+        private void CreateDefaultFleetXml()
+        {
+            try
+            {
+                var defaultFleet = new FleetModelCollection
+                {
+                    Models = new List<FleetModelEntry>
+                    {
+                        new FleetModelEntry { Model = "transitadd1", Company = "First Energy" },
+                        new FleetModelEntry { Model = "transitadd2", Company = "Spectrum Inc." },
+                        new FleetModelEntry { Model = "transitadd3", Company = "Amazon Inc." },
+                        new FleetModelEntry { Model = "transitadd4", Company = "Youtool Stores" },
+                        new FleetModelEntry { Model = "transitadd5", Company = "Bugstars Co" },
+                        new FleetModelEntry { Model = "muleadd1", Company = "CocoaCola Drinks" },
+                        new FleetModelEntry { Model = "muleadd2", Company = "Pepsi Cola" },
+                        new FleetModelEntry { Model = "muleadd3", Company = "Coors Brewing" }
+                    }
+                };
+
+                var serializer = new XmlSerializer(typeof(FleetModelCollection));
+                Directory.CreateDirectory(Path.GetDirectoryName(_fleetXmlPath));
+                using (var writer = new StreamWriter(_fleetXmlPath))
+                {
+                    serializer.Serialize(writer, defaultFleet);
+                }
+
+                Log("[Fleet] Created default fleet XML");
+            }
+            catch (Exception ex)
+            {
+                Log($"[Fleet] Error creating default fleet XML: {ex.Message}");
+            }
+        }
+
+        // Load all available fleet plates from database using fresh connection
+        private void LoadAvailableFleetPlates()
+        {
+            try
+            {
+                if (!_config.EnableFleetVehicles) return;
+
+                if ((DateTime.Now - _lastFleetPlateLoad).TotalMinutes < FLEET_PLATE_RELOAD_MINUTES)
+                    return;
+
+                lock (_fleetLock)
+                {
+                    _availableFleetPlates.Clear();
+
+                    using (var connection = CreateFreshConnection())
+                    {
+                        if (connection == null)
+                        {
+                            DebugLog("[Fleet] Failed to create database connection");
+                            return;
+                        }
+
+                        string query = @"
+                            SELECT license_plate, vehicle_model 
+                            FROM vehicles 
+                            WHERE owner_type = 'company' 
+                              AND is_active = 1
+                            ORDER BY vehicle_model, license_plate";
+
+                        using (var cmd = new SQLiteCommand(query, connection))
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                string plate = SafeConvertToString(reader["license_plate"]);
+                                string model = SafeConvertToString(reader["vehicle_model"]).ToLower();
+
+                                if (!string.IsNullOrEmpty(plate) && !string.IsNullOrEmpty(model))
+                                {
+                                    if (!_availableFleetPlates.ContainsKey(model))
+                                        _availableFleetPlates[model] = new List<string>();
+
+                                    _availableFleetPlates[model].Add(plate);
+                                }
+                            }
+                        }
+                    }
+
+                    _lastFleetPlateLoad = DateTime.Now;
+
+                    foreach (var kvp in _availableFleetPlates)
+                    {
+                        DebugLog($"[Fleet] Model {kvp.Key} has {kvp.Value.Count} available plates");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[Fleet] Error loading fleet plates: {ex.Message}");
+            }
+        }
+
+        // Get an unused fleet plate for a model
+        private string GetUnusedFleetPlate(string model)
+        {
+            try
+            {
+                lock (_fleetLock)
+                {
+                    string modelLower = model.ToLower();
+
+                    if (!_availableFleetPlates.ContainsKey(modelLower))
+                    {
+                        DebugLog($"[Fleet] No plates available for model: {model}");
+                        return null;
+                    }
+
+                    var availablePlates = _availableFleetPlates[modelLower]
+                        .Where(p => !_activeFleetAssignments.ContainsKey(p))
+                        .ToList();
+
+                    if (availablePlates.Count == 0)
+                    {
+                        DebugLog($"[Fleet] All {_availableFleetPlates[modelLower].Count} plates for {model} are currently in use");
+                        return null;
+                    }
+
+                    Random random = new Random();
+                    string selectedPlate = availablePlates[random.Next(availablePlates.Count)];
+
+                    DebugLog($"[Fleet] Selected unused plate {selectedPlate} for model {model}");
+                    return selectedPlate;
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"[Fleet] Error getting unused plate: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Clean up fleet assignments
+        private void CleanupFleetAssignments()
+        {
+            try
+            {
+                lock (_fleetLock)
+                {
+                    var allVehicles = World.GetAllVehicles();
+                    if (allVehicles == null) return;
+
+                    var deadAssignments = _activeFleetAssignments
+                        .Where(kvp => !allVehicles.Any(v => v != null && v.Exists() && CleanPlate(v.LicensePlate) == kvp.Key))
+                        .Select(kvp => kvp.Key)
+                        .ToList();
+
+                    foreach (var plate in deadAssignments)
+                    {
+                        _activeFleetAssignments.Remove(plate);
+                        DebugLog($"[Fleet] Freed up plate {plate}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error cleaning up fleet assignments: {ex.Message}");
+            }
         }
 
         private void DatabaseWorker()
@@ -566,6 +1313,8 @@ namespace PersistentWorld.Vehicles
                         CleanupProtectedPlates();
                         CleanupUsedNames();
                         CleanupVehicleTracking();
+                        if (_config.EnableFleetVehicles)
+                            CleanupFleetAssignments();
 
                         if (_config.VerboseDebugging)
                         {
@@ -589,8 +1338,14 @@ namespace PersistentWorld.Vehicles
                             {
                                 vehicleCount = _vehicleCurrentDriver.Count;
                             }
+                            int fleetCount = 0;
+                            lock (_fleetLock)
+                            {
+                                fleetCount = _activeFleetAssignments.Count;
+                            }
                             DebugLog($"CACHE STATS - Size:{cacheSize} Hits:{_cacheHits} Misses:{_cacheMisses} HitRate:{(int)((float)_cacheHits / (_cacheHits + _cacheMisses + 1) * 100)}%");
-                            DebugLog($"PROTECTION STATS - Protected Plates:{protectedCount} NamesProtected:{_namesProtected} ForceSuccess:{_nameForceSuccess} ForceFail:{_nameForceFailures} GenderCorrections:{_genderCorrections}");
+                            DebugLog($"PROTECTION STATS - Protected Plates:{protectedCount} NamesProtected:{_namesProtected} ForceSuccess:{_nameForceSuccess} ForceFail:{_nameForceFailures} GenderCorrections:{_genderCorrections} IncarceratedReplaced:{_incarceratedReplaced} StolenVehicles:{_stolenVehiclesProcessed}");
+                            DebugLog($"FLEET STATS - Active Fleet Vehicles:{fleetCount} Total Processed:{_fleetVehiclesProcessed}");
                             DebugLog($"DUPLICATE STATS - UsedNames:{usedNamesCount} DuplicatesFixed:{_duplicateNamesFixed}");
                             DebugLog($"PLATE STATS - PermanentlyChanged:{_permanentlyChangedPlates.Count} ProcessedVehicles:{_processedVehicleIds.Count} TrackedVehicles:{vehicleCount}");
                         }
@@ -629,7 +1384,7 @@ namespace PersistentWorld.Vehicles
                 {
                     try
                     {
-                        if (!action.TargetPed.Exists()) continue;
+                        if (action?.TargetPed == null || !action.TargetPed.Exists()) continue;
 
                         switch (action.Action)
                         {
@@ -657,7 +1412,6 @@ namespace PersistentWorld.Vehicles
                                         if (currentName != action.FullName)
                                         {
                                             DebugLog($"Verification failed for plate {action.Plate} - current: {currentName}, expected: {action.FullName}");
-                                            // Queue another force attempt
                                             for (int i = 0; i < _config.NameForceAttempts; i++)
                                             {
                                                 QueueNameForce(action.TargetPed, action.FirstName, action.LastName,
@@ -677,7 +1431,6 @@ namespace PersistentWorld.Vehicles
                                 break;
 
                             case NameProtectionAction.ActionType.CheckNewDriver:
-                                // This action is for when a new driver enters a protected vehicle
                                 DebugLog($"New driver detected for protected plate {action.Plate} - forcing name to {action.FirstName} {action.LastName}");
                                 for (int i = 0; i < _config.NameForceAttempts; i++)
                                 {
@@ -699,10 +1452,12 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Queue a name force action (to be processed on main thread)
+        // Queue a name force action
         private void QueueNameForce(Ped ped, string firstName, string lastName, string fullName,
             string plate, string originalPlate, string targetGender)
         {
+            if (ped == null) return;
+
             lock (_nameActionLock)
             {
                 _pendingNameActions.Enqueue(new NameProtectionAction
@@ -724,6 +1479,8 @@ namespace PersistentWorld.Vehicles
         private void QueueNameVerification(Ped ped, string firstName, string lastName, string fullName,
             string plate, string originalPlate, string targetGender)
         {
+            if (ped == null) return;
+
             lock (_nameActionLock)
             {
                 _pendingNameActions.Enqueue(new NameProtectionAction
@@ -744,6 +1501,8 @@ namespace PersistentWorld.Vehicles
         private void QueueNewDriverCheck(Ped ped, string firstName, string lastName, string fullName,
             string plate, string originalPlate, string targetGender)
         {
+            if (ped == null) return;
+
             lock (_nameActionLock)
             {
                 _pendingNameActions.Enqueue(new NameProtectionAction
@@ -760,7 +1519,7 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // NEW: Detect gender from first name (returns string "Male", "Female", or "Unknown")
+        // Detect gender from first name
         private string DetectGenderFromName(string firstName)
         {
             if (string.IsNullOrEmpty(firstName))
@@ -774,7 +1533,6 @@ namespace PersistentWorld.Vehicles
             if (_femaleFirstNames.Contains(lowerFirstName))
                 return "Female";
 
-            // Try to guess by last character (common pattern)
             if (lowerFirstName.EndsWith("a") || lowerFirstName.EndsWith("e") ||
                 lowerFirstName.EndsWith("y") || lowerFirstName == "ashley")
                 return "Female";
@@ -782,7 +1540,7 @@ namespace PersistentWorld.Vehicles
             return "Unknown";
         }
 
-        // NEW: Get a random ped model for the specified gender
+        // Get random ped model for gender
         private string GetRandomPedModelForGender(string gender)
         {
             Random random = new Random();
@@ -796,15 +1554,16 @@ namespace PersistentWorld.Vehicles
                 return _femalePedModels.Values.ElementAt(random.Next(_femalePedModels.Count));
             }
 
-            // Default fallbacks
             return gender == "Male" ? "a_m_m_beach_01" : "a_f_m_beach_01";
         }
 
-        // NEW: Change ped model to match gender
+        // Change ped model to match gender
         private bool ChangePedModel(Ped ped, string targetGender)
         {
             try
             {
+                if (ped == null || !ped.Exists()) return false;
+
                 if (!_config.ChangePedModelToMatchGender)
                 {
                     DebugLog("Ped model changing is disabled in config");
@@ -815,7 +1574,6 @@ namespace PersistentWorld.Vehicles
 
                 DebugLog($"Attempting to change ped model to {targetModelName} for gender {targetGender}");
 
-                // Load the model
                 Model targetModel = new Model(targetModelName);
                 if (!targetModel.IsValid)
                 {
@@ -823,13 +1581,8 @@ namespace PersistentWorld.Vehicles
                     return false;
                 }
 
-                // Wait for model to load
                 targetModel.LoadAndWait();
-
-                // Change the ped's model
                 ped.Model = targetModel;
-
-             
 
                 DebugLog($"Successfully changed ped model to {targetModelName}");
                 _genderCorrections++;
@@ -842,79 +1595,64 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Modified internal method to force a ped's name (called on main thread)
+        // Force a ped's name
         private bool ForcePedNameInternal(Ped ped, string firstName, string lastName, string targetGender)
         {
             try
             {
+                if (ped == null || !ped.Exists()) return false;
+
                 DebugLog($"Attempting to force name for ped to: {firstName} {lastName} (Target Gender: {targetGender})");
 
-                // Get the existing persona
                 Persona currentPersona = Functions.GetPersonaForPed(ped);
+                if (currentPersona == null) return false;
 
-                if (currentPersona != null)
+                if (_config.EnableGenderCorrection && targetGender != "Unknown")
                 {
-                    // Check for gender mismatch if enabled
-                    if (_config.EnableGenderCorrection && targetGender != "Unknown")
+                    string currentGender = currentPersona.Gender.ToString();
+
+                    if (currentGender != targetGender)
                     {
-                        string currentGender = currentPersona.Gender.ToString();
+                        DebugLog($"GENDER MISMATCH DETECTED! Current: {currentGender}, Target: {targetGender}");
 
-                        if (currentGender != targetGender)
+                        if (_config.ChangePedModelToMatchGender)
                         {
-                            DebugLog($"GENDER MISMATCH DETECTED! Current: {currentGender}, Target: {targetGender}");
-
-                            // Change the ped model first if enabled
-                            if (_config.ChangePedModelToMatchGender)
-                            {
-                                ChangePedModel(ped, targetGender);
-                            }
-
-                            // FIXED: Parse gender string to Gender enum
-                            Gender newGender = targetGender == "Male" ? Gender.Male : Gender.Female;
-
-                            // Create new persona with correct gender
-                            Persona newPersona = new Persona(firstName, lastName, newGender);
-                            Functions.SetPersonaForPed(ped, newPersona);
+                            ChangePedModel(ped, targetGender);
                         }
-                        else
-                        {
-                            // Gender matches, just update name
-                            Persona newPersona = new Persona(firstName, lastName, currentPersona.Gender);
-                            Functions.SetPersonaForPed(ped, newPersona);
-                        }
+
+                        Gender newGender = targetGender == "Male" ? Gender.Male : Gender.Female;
+                        Persona newPersona = new Persona(firstName, lastName, newGender);
+                        Functions.SetPersonaForPed(ped, newPersona);
                     }
                     else
                     {
-                        // No gender correction, preserve current gender
                         Persona newPersona = new Persona(firstName, lastName, currentPersona.Gender);
                         Functions.SetPersonaForPed(ped, newPersona);
                     }
-
-                    // Get the persona again to verify
-                    Persona afterPersona = Functions.GetPersonaForPed(ped);
-                    if (afterPersona != null)
-                    {
-                        DebugLog($"Name after force: {afterPersona.FullName} (Gender: {afterPersona.Gender})");
-
-                        if (afterPersona.FullName == $"{firstName} {lastName}")
-                        {
-                            DebugLog($"Name force SUCCESSFUL - name is now correct");
-                            return true;
-                        }
-                        else
-                        {
-                            DebugLog($"Name force FAILED - name is still {afterPersona.FullName}");
-                            return false;
-                        }
-                    }
-
-                    return true;
                 }
                 else
                 {
-                    DebugLog($"No existing persona found for ped");
-                    return false;
+                    Persona newPersona = new Persona(firstName, lastName, currentPersona.Gender);
+                    Functions.SetPersonaForPed(ped, newPersona);
                 }
+
+                Persona afterPersona = Functions.GetPersonaForPed(ped);
+                if (afterPersona != null)
+                {
+                    DebugLog($"Name after force: {afterPersona.FullName} (Gender: {afterPersona.Gender})");
+
+                    if (afterPersona.FullName == $"{firstName} {lastName}")
+                    {
+                        DebugLog($"Name force SUCCESSFUL");
+                        return true;
+                    }
+                    else
+                    {
+                        DebugLog($"Name force FAILED - name is still {afterPersona.FullName}");
+                        return false;
+                    }
+                }
+                return true;
             }
             catch (Exception ex)
             {
@@ -937,23 +1675,31 @@ namespace PersistentWorld.Vehicles
                         Vehicle vehicle = kvp.Key;
                         Ped lastDriver = kvp.Value;
 
-                        if (!vehicle.Exists())
+                        if (vehicle == null || !vehicle.Exists())
                         {
                             vehiclesToRemove.Add(vehicle);
                             continue;
                         }
 
-                        Ped currentDriver = vehicle.Driver;
+                        Ped currentDriver = null;
+                        try
+                        {
+                            currentDriver = vehicle.Driver;
+                        }
+                        catch
+                        {
+                            // Vehicle might be invalid
+                            vehiclesToRemove.Add(vehicle);
+                            continue;
+                        }
 
                         // If driver changed
                         if (currentDriver != lastDriver)
                         {
                             string plate = CleanPlate(vehicle.LicensePlate);
 
-                            // Update tracking
                             _vehicleCurrentDriver[vehicle] = currentDriver;
 
-                            // Check if this plate is protected
                             lock (_protectedPlatesLock)
                             {
                                 if (_protectedPlates.ContainsKey(plate))
@@ -963,15 +1709,9 @@ namespace PersistentWorld.Vehicles
                                     if (currentDriver != null && currentDriver.Exists())
                                     {
                                         DebugLog($"DRIVER CHANGE DETECTED for protected plate {plate}");
-                                        DebugLog($"  - New driver: {currentDriver.Handle}");
-                                        DebugLog($"  - Expected name: {protectedData.ExpectedFullName}");
-                                        DebugLog($"  - Expected gender: {protectedData.ExpectedGender}");
-
-                                        // Update the protected plate with new driver
                                         protectedData.CurrentDriver = currentDriver;
                                         protectedData.CurrentVehicle = vehicle;
 
-                                        // Queue name force for the new driver
                                         QueueNewDriverCheck(currentDriver,
                                             protectedData.ExpectedFirstName,
                                             protectedData.ExpectedLastName,
@@ -984,7 +1724,6 @@ namespace PersistentWorld.Vehicles
                         }
                     }
 
-                    // Remove dead vehicles
                     foreach (var vehicle in vehiclesToRemove)
                     {
                         _vehicleCurrentDriver.Remove(vehicle);
@@ -998,7 +1737,7 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Modified: Check protected plates and ensure drivers have correct names and genders
+        // Check protected plates and ensure drivers have correct names and genders
         private void CheckProtectedPlates()
         {
             try
@@ -1012,17 +1751,19 @@ namespace PersistentWorld.Vehicles
                         string plate = kvp.Key;
                         ProtectedPlate protectedData = kvp.Value;
 
-                        // Check if vehicle still exists
                         if (protectedData.CurrentVehicle == null || !protectedData.CurrentVehicle.Exists())
                         {
-                            // Try to find the vehicle by plate
                             Vehicle foundVehicle = null;
-                            foreach (var vehicle in World.GetAllVehicles())
+                            var allVehicles = World.GetAllVehicles();
+                            if (allVehicles != null)
                             {
-                                if (vehicle.Exists() && CleanPlate(vehicle.LicensePlate) == plate)
+                                foreach (var vehicle in allVehicles)
                                 {
-                                    foundVehicle = vehicle;
-                                    break;
+                                    if (vehicle != null && vehicle.Exists() && CleanPlate(vehicle.LicensePlate) == plate)
+                                    {
+                                        foundVehicle = vehicle;
+                                        break;
+                                    }
                                 }
                             }
 
@@ -1034,26 +1775,31 @@ namespace PersistentWorld.Vehicles
                             }
                             else
                             {
-                                // Vehicle no longer exists in world
                                 platesToRemove.Add(plate);
                                 DebugLog($"Removing protection for plate {plate} - vehicle no longer exists");
                                 continue;
                             }
                         }
 
-                        // Check current driver
-                        Ped currentDriver = protectedData.CurrentVehicle.Driver;
+                        Ped currentDriver = null;
+                        try
+                        {
+                            currentDriver = protectedData.CurrentVehicle.Driver;
+                        }
+                        catch
+                        {
+                            platesToRemove.Add(plate);
+                            continue;
+                        }
 
                         if (currentDriver != null && currentDriver.Exists())
                         {
-                            // Update stored driver if changed
                             if (currentDriver != protectedData.CurrentDriver)
                             {
                                 protectedData.CurrentDriver = currentDriver;
                                 DebugLog($"Driver changed for protected plate {plate} - new driver detected");
                             }
 
-                            // Get current name and gender
                             Persona persona = Functions.GetPersonaForPed(currentDriver);
                             if (persona != null)
                             {
@@ -1064,21 +1810,16 @@ namespace PersistentWorld.Vehicles
 
                                 bool needsCorrection = false;
 
-                                // Check name mismatch
                                 if (currentName != expectedName)
                                 {
-                                    DebugLog($"NAME MISMATCH for protected plate {plate}!");
-                                    DebugLog($"  - Expected: {expectedName}");
-                                    DebugLog($"  - Current: {currentName}");
+                                    DebugLog($"NAME MISMATCH for {(protectedData.IsStolenVehicle ? "STOLEN " : "")}vehicle {plate}!");
+                                    DebugLog($"  Current: {currentName}, Expected: {expectedName}");
                                     needsCorrection = true;
                                 }
 
-                                // Check gender mismatch if enabled
                                 if (_config.EnableGenderCorrection && expectedGender != "Unknown" && currentGender != expectedGender)
                                 {
-                                    DebugLog($"GENDER MISMATCH for protected plate {plate}!");
-                                    DebugLog($"  - Expected gender: {expectedGender}");
-                                    DebugLog($"  - Current gender: {currentGender}");
+                                    DebugLog($"GENDER MISMATCH for {(protectedData.IsStolenVehicle ? "STOLEN " : "")}vehicle {plate}!");
                                     needsCorrection = true;
                                 }
 
@@ -1086,8 +1827,11 @@ namespace PersistentWorld.Vehicles
                                 {
                                     DebugLog($"  - Forcing correction...");
 
-                                    // Queue force actions
-                                    for (int i = 0; i < _config.NameForceAttempts; i++)
+                                    // Stolen vehicles get more forceful correction
+                                    int forceAttempts = protectedData.IsStolenVehicle ?
+                                        Math.Max(5, _config.NameForceAttempts) : _config.NameForceAttempts;
+
+                                    for (int i = 0; i < forceAttempts; i++)
                                     {
                                         QueueNameForce(currentDriver,
                                             protectedData.ExpectedFirstName,
@@ -1096,22 +1840,23 @@ namespace PersistentWorld.Vehicles
                                             expectedGender);
                                     }
 
-                                    // Queue verification
-                                    QueueNameVerification(currentDriver,
-                                        protectedData.ExpectedFirstName,
-                                        protectedData.ExpectedLastName,
-                                        expectedName, plate, protectedData.OriginalPlate,
-                                        expectedGender);
+                                    if (protectedData.IsStolenVehicle)
+                                    {
+                                        DebugLog($"STOLEN VEHICLE CORRECTION: Forcing alternative name/gender for plate {plate}");
+                                    }
 
                                     protectedData.ForceCount++;
                                     protectedData.LastForceTime = DateTime.Now;
                                     _namesProtected++;
                                 }
+                                else if (protectedData.IsStolenVehicle)
+                                {
+                                    DebugLog($"STOLEN VEHICLE {plate}: Name correct - alternative driver {currentName} is properly assigned");
+                                }
                             }
                         }
                     }
 
-                    // Remove dead plates
                     foreach (var plate in platesToRemove)
                     {
                         _protectedPlates.Remove(plate);
@@ -1124,7 +1869,7 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Modified debug method to log all protected plates with gender info
+        // Debug method to log all protected plates
         private void DebugLogProtectedPlates()
         {
             try
@@ -1152,7 +1897,7 @@ namespace PersistentWorld.Vehicles
                             currentGender = persona?.Gender.ToString() ?? "Unknown";
                         }
 
-                        DebugLog($"PLATE: {plate}");
+                        DebugLog($"PLATE: {plate} {(protectedData.IsStolenVehicle ? "(STOLEN)" : "")}");
                         DebugLog($"  - Expected Name: {protectedData.ExpectedFullName}");
                         DebugLog($"  - Expected Gender: {protectedData.ExpectedGender}");
                         DebugLog($"  - Current Name: {currentName}");
@@ -1162,13 +1907,7 @@ namespace PersistentWorld.Vehicles
                         DebugLog($"  - Driver Status: {driverStatus}");
                         DebugLog($"  - Protected Since: {protectedData.ProtectedSince:HH:mm:ss}");
                         DebugLog($"  - Force Count: {protectedData.ForceCount}");
-
-                        if ((currentName != protectedData.ExpectedFullName ||
-                             (_config.EnableGenderCorrection && currentGender != protectedData.ExpectedGender))
-                            && protectedData.CurrentDriver?.Exists() == true)
-                        {
-                            DebugLog($"  *** MISMATCH DETECTED! ***");
-                        }
+                        DebugLog($"  - Is Stolen Vehicle: {protectedData.IsStolenVehicle}");
                     }
                 }
 
@@ -1183,36 +1922,34 @@ namespace PersistentWorld.Vehicles
         // Check for duplicate names and fix them
         private bool HandleDuplicateName(Ped ped, string firstName, string lastName, string originalPlate, string newPlate)
         {
+            if (ped == null) return false;
+
             string nameKey = GetNameKey(firstName, lastName);
 
             lock (_usedNamesLock)
             {
                 if (_usedNames.ContainsKey(nameKey))
                 {
-                    // Duplicate found!
                     Ped existingPed = _usedNames[nameKey];
 
-                    if (existingPed.Exists() && existingPed != ped)
+                    if (existingPed != null && existingPed.Exists() && existingPed != ped)
                     {
                         DebugLog($"DUPLICATE NAME DETECTED: {firstName} {lastName} already in use by another ped");
 
                         if (_config.AutoGenerateNamesForDuplicates)
                         {
-                            // Generate a unique name
                             var uniqueName = GenerateUniqueName();
                             string newFirstName = uniqueName.Item1;
                             string newLastName = uniqueName.Item2;
                             string newGender = DetectGenderFromName(newFirstName);
 
-                            DebugLog($"Assigning unique name: {newFirstName} {newLastName} (Gender: {newGender}) to ped (was {firstName} {lastName})");
+                            DebugLog($"Assigning unique name: {newFirstName} {newLastName} (Gender: {newGender}) to ped");
 
-                            // Queue the name force action
                             QueueNameForce(ped, newFirstName, newLastName, $"{newFirstName} {newLastName}",
                                 newPlate, originalPlate, newGender);
 
                             _duplicateNamesFixed++;
 
-                            // Add new name to used names
                             string newNameKey = GetNameKey(newFirstName, newLastName);
                             _usedNames[newNameKey] = ped;
 
@@ -1222,7 +1959,6 @@ namespace PersistentWorld.Vehicles
                 }
                 else
                 {
-                    // No duplicate, add to used names
                     _usedNames[nameKey] = ped;
                 }
             }
@@ -1376,7 +2112,7 @@ namespace PersistentWorld.Vehicles
             {
                 lock (_usedNamesLock)
                 {
-                    var deadPeds = _usedNames.Where(kvp => !kvp.Value.Exists()).Select(kvp => kvp.Key).ToList();
+                    var deadPeds = _usedNames.Where(kvp => kvp.Value == null || !kvp.Value.Exists()).Select(kvp => kvp.Key).ToList();
                     foreach (var nameKey in deadPeds)
                     {
                         _usedNames.Remove(nameKey);
@@ -1400,7 +2136,7 @@ namespace PersistentWorld.Vehicles
             {
                 lock (_vehicleLock)
                 {
-                    var deadVehicles = _vehicleCurrentDriver.Keys.Where(v => !v.Exists()).ToList();
+                    var deadVehicles = _vehicleCurrentDriver.Keys.Where(v => v == null || !v.Exists()).ToList();
                     foreach (var vehicle in deadVehicles)
                     {
                         _vehicleCurrentDriver.Remove(vehicle);
@@ -1482,12 +2218,34 @@ namespace PersistentWorld.Vehicles
             {
                 DebugLog($"Processing model update for {update.Plate} to {update.Model}");
 
-                _database.UpdateVehicleModel(update.Plate, update.Model);
+                // Use a fresh connection for the update
+                using (var connection = CreateFreshConnection())
+                {
+                    if (connection == null)
+                    {
+                        DebugLog($"Failed to create connection for model update");
+                        return false;
+                    }
+
+                    string updateQuery = @"
+                        UPDATE vehicles 
+                        SET vehicle_model = @model,
+                            last_modified = CURRENT_TIMESTAMP
+                        WHERE license_plate = @plate 
+                          AND is_active = 1 
+                          AND owner_type = 'person'";
+
+                    using (var cmd = new SQLiteCommand(updateQuery, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@plate", update.Plate);
+                        cmd.Parameters.AddWithValue("@model", update.Model);
+                        cmd.ExecuteNonQuery();
+                    }
+                }
 
                 _modelUpdatesCompleted++;
                 DebugLog($"SUCCESS: Updated model for {update.Plate} to {update.Model}");
 
-                // Update last known model
                 lock (_lastKnownModel)
                 {
                     _lastKnownModel[update.Plate] = update.Model;
@@ -1531,17 +2289,13 @@ namespace PersistentWorld.Vehicles
 
             try
             {
-                // Run normal vehicle scan
                 if ((DateTime.Now - _lastScan).TotalMilliseconds > _config.ScanIntervalMs)
                 {
                     ScanNearbyVehicles();
                     _lastScan = DateTime.Now;
                 }
 
-                // Process any pending name protection actions (on main thread)
                 ProcessNameActions();
-
-                // Check for name changes and driver changes every second
                 CheckAndRestoreNames();
             }
             catch (Exception ex)
@@ -1554,40 +2308,126 @@ namespace PersistentWorld.Vehicles
         {
             try
             {
+                // ===== CRITICAL SAFETY CHECKS =====
+                if (Game.LocalPlayer == null)
+                {
+                    DebugLog("ScanNearbyVehicles: Local player is null - skipping");
+                    return;
+                }
+
+                if (Game.LocalPlayer.Character == null)
+                {
+                    DebugLog("ScanNearbyVehicles: Player character is null - skipping");
+                    return;
+                }
+
+                if (!Game.LocalPlayer.Character.Exists())
+                {
+                    DebugLog("ScanNearbyVehicles: Player character doesn't exist - skipping");
+                    return;
+                }
+
                 Vector3 playerPos = Game.LocalPlayer.Character.Position;
                 int vehiclesScanned = 0;
                 int platesChanged = 0;
                 int updatesQueued = 0;
                 int duplicatesFixed = 0;
+                int fleetPlatesAssigned = 0;
 
                 DebugLog("========== STARTING VEHICLE SCAN ==========");
                 DebugLog($"Player position: {playerPos}");
 
-                foreach (var vehicle in World.GetAllVehicles())
+                if (_config.EnableFleetVehicles)
                 {
                     try
                     {
-                        if (!vehicle.Exists()) continue;
+                        LoadFleetXml();
+                        LoadAvailableFleetPlates();
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLog($"Error loading fleet data: {ex.Message}");
+                    }
+                }
 
+                // Get all vehicles safely
+                Vehicle[] allVehicles = null;
+                try
+                {
+                    allVehicles = World.GetAllVehicles();
+                }
+                catch (Exception ex)
+                {
+                    DebugLog($"Error getting vehicles: {ex.Message}");
+                    return;
+                }
+
+                if (allVehicles == null)
+                {
+                    DebugLog("World.GetAllVehicles() returned null");
+                    return;
+                }
+
+                foreach (var vehicle in allVehicles)
+                {
+                    try
+                    {
+                        // ===== VEHICLE NULL CHECKS =====
+                        if (vehicle == null)
+                        {
+                            DebugLog("Vehicle is null - skipping");
+                            continue;
+                        }
+
+                        if (!vehicle.Exists())
+                        {
+                            DebugLog("Vehicle doesn't exist - skipping");
+                            continue;
+                        }
+
+                        // Distance check
                         float distance = Vector3.Distance(vehicle.Position, playerPos);
                         if (distance > _config.ScanRadius) continue;
 
                         vehiclesScanned++;
                         _totalVehiclesScanned++;
 
-                        // Apply MaxVehiclesPerScan limit
                         if (vehiclesScanned > _config.MaxVehiclesPerScan)
                         {
                             DebugLog($"Reached max vehicles per scan ({_config.MaxVehiclesPerScan})");
                             break;
                         }
 
-                        // Get vehicle ID for tracking
-                        int vehicleId = vehicle.GetHashCode();
+                        // ===== PLATE CHECKS =====
+                        string currentPlate = null;
+                        try
+                        {
+                            currentPlate = vehicle.LicensePlate;
+                        }
+                        catch
+                        {
+                            DebugLog("Could not get license plate - skipping");
+                            continue;
+                        }
 
-                        // Check if this vehicle has already been processed permanently
-                        string currentPlate = vehicle.LicensePlate;
+                        if (string.IsNullOrEmpty(currentPlate))
+                        {
+                            DebugLog("Vehicle has no license plate - skipping");
+                            continue;
+                        }
+
                         string currentPlateClean = CleanPlate(currentPlate);
+
+                        int vehicleId = 0;
+                        try
+                        {
+                            vehicleId = vehicle.GetHashCode();
+                        }
+                        catch
+                        {
+                            DebugLog("Could not get vehicle hash code - using plate hash");
+                            vehicleId = currentPlateClean.GetHashCode();
+                        }
 
                         if (_processedVehicleIds.Contains(vehicleId))
                         {
@@ -1595,7 +2435,6 @@ namespace PersistentWorld.Vehicles
                             continue;
                         }
 
-                        // Check if this plate has been permanently changed
                         if (_permanentlyChangedPlates.Contains(currentPlateClean))
                         {
                             DebugLog($"Plate {currentPlateClean} has already been permanently changed - skipping");
@@ -1603,7 +2442,6 @@ namespace PersistentWorld.Vehicles
                             continue;
                         }
 
-                        // Check if vehicle was processed too recently
                         if (_lastVehicleProcessTime.TryGetValue(vehicleId, out DateTime lastProcessed))
                         {
                             if ((DateTime.Now - lastProcessed).TotalSeconds < _config.VehicleProcessCooldownSeconds)
@@ -1614,59 +2452,156 @@ namespace PersistentWorld.Vehicles
                             }
                         }
 
-                        // Skip emergency vehicles if configured
                         if (_config.IgnoreEmergencyVehicles && IsEmergencyVehicle(vehicle))
                         {
                             DebugLog($"Skipping emergency vehicle: {vehicle.Model.Name}");
                             continue;
                         }
 
-                        string currentModel = vehicle.Model.Name?.ToLower() ?? "";
-
-                        // Get the driver
-                        Ped driver = vehicle.Driver;
-                        if (driver == null || !driver.Exists() || !driver.IsHuman)
+                        string currentModel = null;
+                        try
                         {
-                            DebugLog($"Vehicle {currentPlateClean} has no human driver");
-
-                            // Still track the vehicle even without driver
-                            lock (_vehicleLock)
-                            {
-                                _vehicleCurrentPlate[vehicle] = currentPlateClean;
-                                _vehicleCurrentDriver[vehicle] = null;
-                            }
-
-                            _lastVehicleProcessTime[vehicleId] = DateTime.Now;
+                            currentModel = vehicle.Model.Name?.ToLower() ?? "";
+                        }
+                        catch
+                        {
+                            DebugLog("Could not get vehicle model - skipping");
                             continue;
                         }
 
-                        // Track vehicle and driver
+                        bool isFleetModel = _config.EnableFleetVehicles && _fleetModels.Contains(currentModel);
+
+                        Ped driver = null;
+                        try
+                        {
+                            driver = vehicle.Driver;
+                        }
+                        catch
+                        {
+                            DebugLog("Could not get vehicle driver - skipping");
+                            continue;
+                        }
+
                         lock (_vehicleLock)
                         {
                             _vehicleCurrentPlate[vehicle] = currentPlateClean;
                             _vehicleCurrentDriver[vehicle] = driver;
                         }
 
-                        // Get driver name
+                        // ===== FLEET VEHICLE HANDLING =====
+                        if (isFleetModel)
+                        {
+                            DebugLog($"FLEET VEHICLE DETECTED: Model={currentModel}, Current Plate={currentPlateClean}");
+
+                            string fleetAssignedPlate = GetUnusedFleetPlate(currentModel);
+
+                            if (!string.IsNullOrEmpty(fleetAssignedPlate))
+                            {
+                                string fleetAssignedPlateClean = CleanPlate(fleetAssignedPlate);
+
+                                if (currentPlateClean != fleetAssignedPlateClean)
+                                {
+                                    DebugLog($"Assigning fleet plate {fleetAssignedPlateClean} to {currentModel} vehicle (was {currentPlateClean})");
+
+                                    try
+                                    {
+                                        vehicle.LicensePlate = fleetAssignedPlate;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        DebugLog($"Failed to set license plate: {ex.Message}");
+                                        continue;
+                                    }
+
+                                    platesChanged++;
+                                    fleetPlatesAssigned++;
+                                    _fleetVehiclesProcessed++;
+
+                                    lock (_vehicleLock)
+                                    {
+                                        _vehicleCurrentPlate[vehicle] = fleetAssignedPlateClean;
+                                    }
+
+                                    _permanentlyChangedPlates.Add(fleetAssignedPlateClean);
+                                    _processedVehicleIds.Add(vehicleId);
+                                    _recentlyChangedPlates[fleetAssignedPlateClean] = DateTime.Now;
+
+                                    lock (_fleetLock)
+                                    {
+                                        string company = _fleetModelToCompany.ContainsKey(currentModel) ? _fleetModelToCompany[currentModel] : "Unknown";
+                                        _activeFleetAssignments[fleetAssignedPlateClean] = new FleetVehicleAssignment
+                                        {
+                                            Plate = fleetAssignedPlateClean,
+                                            Model = currentModel,
+                                            Company = company,
+                                            VehicleId = vehicleId,
+                                            AssignedAt = DateTime.Now
+                                        };
+                                    }
+
+                                    Log($"[Fleet] Assigned plate {fleetAssignedPlateClean} to {currentModel} ({_fleetModelToCompany[currentModel]})");
+                                }
+                                else
+                                {
+                                    DebugLog($"Fleet vehicle already has correct plate: {currentPlateClean}");
+
+                                    lock (_fleetLock)
+                                    {
+                                        if (!_activeFleetAssignments.ContainsKey(currentPlateClean))
+                                        {
+                                            string company = _fleetModelToCompany.ContainsKey(currentModel) ? _fleetModelToCompany[currentModel] : "Unknown";
+                                            _activeFleetAssignments[currentPlateClean] = new FleetVehicleAssignment
+                                            {
+                                                Plate = currentPlateClean,
+                                                Model = currentModel,
+                                                Company = company,
+                                                VehicleId = vehicleId,
+                                                AssignedAt = DateTime.Now
+                                            };
+                                        }
+                                    }
+
+                                    _permanentlyChangedPlates.Add(currentPlateClean);
+                                    _processedVehicleIds.Add(vehicleId);
+                                }
+
+                                if (QueueModelUpdate(fleetAssignedPlateClean, currentModel))
+                                    updatesQueued++;
+
+                                _lastVehicleProcessTime[vehicleId] = DateTime.Now;
+                                continue;
+                            }
+                            else
+                            {
+                                DebugLog($"[Fleet] No available plates for model {currentModel} - cannot assign");
+                            }
+                        }
+
+                        // ===== PERSONAL VEHICLE HANDLING =====
+                        if (driver == null || !driver.Exists() || !driver.IsHuman)
+                        {
+                            DebugLog($"Vehicle {currentPlateClean} has no human driver");
+                            _lastVehicleProcessTime[vehicleId] = DateTime.Now;
+                            continue;
+                        }
+
                         string driverName = GetPedNameFromPersona(driver);
 
                         if (string.IsNullOrEmpty(driverName))
                         {
                             DebugLog($"Could not get name for driver of {currentPlateClean}");
+                            _lastVehicleProcessTime[vehicleId] = DateTime.Now;
                             continue;
                         }
 
                         DebugLog($"Driver found: '{driverName}' driving {vehicle.Model.Name} with plate '{currentPlate}'");
                         _totalNamesFound++;
 
-                        // Try to get person from cache first
                         var person = GetPersonFromCache(driverName, driver, vehicle);
 
                         if (person == null)
                         {
                             DebugLog($"No database entry found for '{driverName}'");
-
-                            // Mark vehicle as processed even if no match
                             _lastVehicleProcessTime[vehicleId] = DateTime.Now;
                             continue;
                         }
@@ -1677,8 +2612,6 @@ namespace PersistentWorld.Vehicles
                         if (string.IsNullOrEmpty(assignedPlate))
                         {
                             DebugLog($"No assigned plate found for {driverName}");
-
-                            // Mark vehicle as processed
                             _lastVehicleProcessTime[vehicleId] = DateTime.Now;
                             continue;
                         }
@@ -1686,27 +2619,126 @@ namespace PersistentWorld.Vehicles
                         string assignedPlateClean = CleanPlate(assignedPlate);
                         DebugLog($"Assigned plate from database: '{assignedPlate}' (clean: '{assignedPlateClean}')");
 
-                        // Check if plate needs changing
+                        // Check if vehicle is stolen first
+                        bool isStolen = false;
+                        string originalPlate = currentPlateClean;
+                        var vehicleData = _database.GetVehicleByPlate(originalPlate);
+                        if (vehicleData != null)
+                        {
+                            isStolen = IsVehicleStolen(vehicleData);
+                        }
+
+                        // ===== STOLEN VEHICLE HANDLING =====
+                        if (isStolen)
+                        {
+                            DebugLog($"STOLEN VEHICLE DETECTED: {originalPlate} - finding alternative driver from database");
+
+                            string stolenDriverFirstName = "";
+                            string stolenDriverLastName = "";
+                            string stolenDriverFullName = "";
+                            string stolenDriverGender = "Unknown";
+
+                            // Try to get a different person from the database (exclude the owner)
+                            var alternativePerson = GetRandomPersonExcludingCurrent(person);
+
+                            if (alternativePerson != null)
+                            {
+                                stolenDriverFirstName = SafeConvertToString(alternativePerson.ContainsKey("first_name") ? alternativePerson["first_name"] : null);
+                                stolenDriverLastName = SafeConvertToString(alternativePerson.ContainsKey("last_name") ? alternativePerson["last_name"] : null);
+                                stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
+                                stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
+
+                                DebugLog($"STOLEN VEHICLE: Assigned alternative DB driver {stolenDriverFullName} to stolen vehicle {originalPlate}");
+                            }
+                            else
+                            {
+                                // Fallback: use names from database if available
+                                var namesFromDB = GetAllNamesFromDatabase();
+                                if (namesFromDB.Count > 0)
+                                {
+                                    Random rand = new Random();
+                                    var randomName = namesFromDB[rand.Next(namesFromDB.Count)];
+                                    stolenDriverFirstName = randomName.Item1;
+                                    stolenDriverLastName = randomName.Item2;
+                                    stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
+                                    stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
+                                    DebugLog($"STOLEN VEHICLE: Using random DB name {stolenDriverFullName} for stolen vehicle {originalPlate}");
+                                }
+                                else
+                                {
+                                    // Ultimate fallback
+                                    stolenDriverFirstName = _config.DefaultFirstName;
+                                    stolenDriverLastName = _config.DefaultLastName;
+                                    stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
+                                    stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
+                                    DebugLog($"STOLEN VEHICLE: Using default name {stolenDriverFullName} for stolen vehicle {originalPlate}");
+                                }
+                            }
+
+                            // Force the stolen vehicle driver to have the alternative database name
+                            for (int i = 0; i < Math.Max(5, _config.NameForceAttempts); i++)
+                            {
+                                QueueNameForce(driver, stolenDriverFirstName, stolenDriverLastName,
+                                    stolenDriverFullName, originalPlate, originalPlate, stolenDriverGender);
+                            }
+
+                            // Add to protected plates with the ALTERNATIVE database name
+                            lock (_protectedPlatesLock)
+                            {
+                                _protectedPlates[originalPlate] = new ProtectedPlate
+                                {
+                                    Plate = originalPlate,
+                                    ExpectedFirstName = stolenDriverFirstName,    // Alternative DB name
+                                    ExpectedLastName = stolenDriverLastName,       // Alternative DB name
+                                    ExpectedFullName = stolenDriverFullName,      // Alternative DB name
+                                    ExpectedGender = stolenDriverGender,
+                                    ProtectedSince = DateTime.Now,
+                                    OriginalPlate = originalPlate,
+                                    ForceCount = 0,
+                                    LastForceTime = DateTime.Now,
+                                    CurrentDriver = driver,
+                                    CurrentVehicle = vehicle,
+                                    IsStolenVehicle = true
+                                };
+                            }
+
+                            // Set up frequent verification for stolen vehicles (with alternative name)
+                            QueueNameVerification(driver, stolenDriverFirstName, stolenDriverLastName,
+                                stolenDriverFullName, originalPlate, originalPlate, stolenDriverGender);
+
+                            // Use the alternative name for duplicate tracking
+                            string stolenNameKey = GetNameKey(stolenDriverFirstName, stolenDriverLastName);
+                            lock (_usedNamesLock)
+                            {
+                                _usedNames[stolenNameKey] = driver;
+                            }
+
+                            _stolenVehiclesProcessed++;
+                            _lastVehicleProcessTime[vehicleId] = DateTime.Now;
+
+                            // Mark as permanently processed to avoid re-scanning
+                            _permanentlyChangedPlates.Add(originalPlate);
+                            _processedVehicleIds.Add(vehicleId);
+                            continue;
+                        }
+
+                        // ===== NORMAL VEHICLE HANDLING =====
                         if (currentPlateClean != assignedPlateClean)
                         {
                             DebugLog($"Plate mismatch: Current='{currentPlateClean}', Database='{assignedPlateClean}'");
 
-                            // Check cooldown for this permanent plate
                             if (_recentlyChangedPlates.ContainsKey(assignedPlateClean))
                             {
                                 TimeSpan cooldownRemaining = DateTime.Now - _recentlyChangedPlates[assignedPlateClean];
                                 DebugLog($"Plate {assignedPlateClean} is in cooldown ({cooldownRemaining.TotalSeconds:F1}s ago)");
-
                                 _lastVehicleProcessTime[vehicleId] = DateTime.Now;
                                 continue;
                             }
 
-                            // Get name parts
                             string[] nameParts = driverName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                            string firstName = nameParts[0];
+                            string firstName = nameParts.Length > 0 ? nameParts[0] : "";
                             string lastName = nameParts.Length > 1 ? string.Join(" ", nameParts.Skip(1)) : "";
 
-                            // Check for duplicate names before changing plate
                             bool duplicateHandled = HandleDuplicateName(driver, firstName, lastName, currentPlateClean, assignedPlateClean);
 
                             if (duplicateHandled)
@@ -1715,35 +2747,34 @@ namespace PersistentWorld.Vehicles
                                 DebugLog($"Duplicate name handled for {driverName}");
                             }
 
-                            // Log before plate change
                             DebugLog($"BEFORE PLATE CHANGE - Driver: {driverName}, Current Plate: {currentPlateClean}, Target Plate: {assignedPlateClean}");
 
-                            // Change the IN-GAME plate
-                            vehicle.LicensePlate = assignedPlate;
+                            try
+                            {
+                                vehicle.LicensePlate = assignedPlate;
+                            }
+                            catch (Exception ex)
+                            {
+                                DebugLog($"Failed to set license plate: {ex.Message}");
+                                continue;
+                            }
+
                             _processedCount++;
                             platesChanged++;
 
-                            // Update vehicle tracking with new plate
                             lock (_vehicleLock)
                             {
                                 _vehicleCurrentPlate[vehicle] = assignedPlateClean;
                             }
 
-                            // Mark as permanently changed
                             _permanentlyChangedPlates.Add(assignedPlateClean);
                             _processedVehicleIds.Add(vehicleId);
                             _recentlyChangedPlates[assignedPlateClean] = DateTime.Now;
 
                             Log($"[VehicleAttach] PERMANENTLY changed plate for driver from '{currentPlate}' to '{assignedPlate}'");
 
-                            // Get the correct name from the person object
-                            string correctFirstName = "";
-                            string correctLastName = "";
-
-                            if (person.ContainsKey("first_name") && person["first_name"] != null)
-                                correctFirstName = person["first_name"].ToString();
-                            if (person.ContainsKey("last_name") && person["last_name"] != null)
-                                correctLastName = person["last_name"].ToString();
+                            string correctFirstName = SafeConvertToString(person.ContainsKey("first_name") ? person["first_name"] : null);
+                            string correctLastName = SafeConvertToString(person.ContainsKey("last_name") ? person["last_name"] : null);
 
                             if (!string.IsNullOrEmpty(correctFirstName) && !string.IsNullOrEmpty(correctLastName))
                             {
@@ -1752,7 +2783,6 @@ namespace PersistentWorld.Vehicles
 
                                 DebugLog($"Protecting plate {assignedPlateClean} for driver: {correctFullName} (Gender: {correctGender})");
 
-                                // Add to protected plates
                                 lock (_protectedPlatesLock)
                                 {
                                     _protectedPlates[assignedPlateClean] = new ProtectedPlate
@@ -1761,28 +2791,26 @@ namespace PersistentWorld.Vehicles
                                         ExpectedFirstName = correctFirstName,
                                         ExpectedLastName = correctLastName,
                                         ExpectedFullName = correctFullName,
-                                        ExpectedGender = correctGender, // NEW: Store expected gender
+                                        ExpectedGender = correctGender,
                                         ProtectedSince = DateTime.Now,
                                         OriginalPlate = currentPlateClean,
                                         ForceCount = 0,
                                         LastForceTime = DateTime.Now,
                                         CurrentDriver = driver,
-                                        CurrentVehicle = vehicle
+                                        CurrentVehicle = vehicle,
+                                        IsStolenVehicle = false
                                     };
                                 }
 
-                                // Queue name force actions for current driver
                                 for (int i = 0; i < _config.NameForceAttempts; i++)
                                 {
                                     QueueNameForce(driver, correctFirstName, correctLastName,
                                         correctFullName, assignedPlateClean, currentPlateClean, correctGender);
                                 }
 
-                                // Queue a verification action
                                 QueueNameVerification(driver, correctFirstName, correctLastName,
                                     correctFullName, assignedPlateClean, currentPlateClean, correctGender);
 
-                                // Add to used names
                                 string nameKey = GetNameKey(correctFirstName, correctLastName);
                                 lock (_usedNamesLock)
                                 {
@@ -1790,7 +2818,6 @@ namespace PersistentWorld.Vehicles
                                 }
                             }
 
-                            // Queue model update
                             if (QueueModelUpdate(assignedPlateClean, currentModel))
                                 updatesQueued++;
                         }
@@ -1798,24 +2825,16 @@ namespace PersistentWorld.Vehicles
                         {
                             DebugLog($"Plate already matches database: '{currentPlateClean}'");
 
-                            // Check if this plate should be protected (if it's a permanently changed plate)
                             if (_permanentlyChangedPlates.Contains(currentPlateClean))
                             {
-                                // Get the correct name from the person object
-                                string correctFirstName = "";
-                                string correctLastName = "";
-
-                                if (person.ContainsKey("first_name") && person["first_name"] != null)
-                                    correctFirstName = person["first_name"].ToString();
-                                if (person.ContainsKey("last_name") && person["last_name"] != null)
-                                    correctLastName = person["last_name"].ToString();
+                                string correctFirstName = SafeConvertToString(person.ContainsKey("first_name") ? person["first_name"] : null);
+                                string correctLastName = SafeConvertToString(person.ContainsKey("last_name") ? person["last_name"] : null);
 
                                 if (!string.IsNullOrEmpty(correctFirstName) && !string.IsNullOrEmpty(correctLastName))
                                 {
                                     string correctFullName = $"{correctFirstName} {correctLastName}";
                                     string correctGender = DetectGenderFromName(correctFirstName);
 
-                                    // Ensure plate is in protected list
                                     lock (_protectedPlatesLock)
                                     {
                                         if (!_protectedPlates.ContainsKey(currentPlateClean))
@@ -1833,12 +2852,12 @@ namespace PersistentWorld.Vehicles
                                                 ForceCount = 0,
                                                 LastForceTime = DateTime.Now,
                                                 CurrentDriver = driver,
-                                                CurrentVehicle = vehicle
+                                                CurrentVehicle = vehicle,
+                                                IsStolenVehicle = false
                                             };
                                         }
                                         else
                                         {
-                                            // Update driver info
                                             _protectedPlates[currentPlateClean].CurrentDriver = driver;
                                             _protectedPlates[currentPlateClean].CurrentVehicle = vehicle;
                                         }
@@ -1846,7 +2865,6 @@ namespace PersistentWorld.Vehicles
                                 }
                             }
 
-                            // Only queue model update if model actually needs updating
                             if (DoesModelNeedUpdate(assignedPlateClean, currentModel))
                             {
                                 if (QueueModelUpdate(assignedPlateClean, currentModel))
@@ -1857,7 +2875,6 @@ namespace PersistentWorld.Vehicles
                                 DebugLog($"Model already up to date for {assignedPlateClean}");
                             }
 
-                            // Mark vehicle as processed
                             _lastVehicleProcessTime[vehicleId] = DateTime.Now;
                         }
                     }
@@ -1867,15 +2884,18 @@ namespace PersistentWorld.Vehicles
                     }
                 }
 
-                DebugLog($"Scan complete: {platesChanged} plates permanently changed, {updatesQueued} updates queued, {duplicatesFixed} duplicates fixed out of {vehiclesScanned} scanned");
-                DebugLog($"NAME STATS - ForceSuccess:{_nameForceSuccess} ForceFail:{_nameForceFailures} GenderCorrections:{_genderCorrections}");
+                DebugLog($"Scan complete: {platesChanged} plates permanently changed ({fleetPlatesAssigned} fleet), {updatesQueued} updates queued, {duplicatesFixed} duplicates fixed out of {vehiclesScanned} scanned");
+                DebugLog($"FLEET STATS - Active Assignments:{_activeFleetAssignments.Count} Total Processed:{_fleetVehiclesProcessed}");
+                DebugLog($"STOLEN VEHICLES - Processed:{_stolenVehiclesProcessed}");
+                DebugLog($"NAME STATS - ForceSuccess:{_nameForceSuccess} ForceFail:{_nameForceFailures} GenderCorrections:{_genderCorrections} IncarceratedReplaced:{_incarceratedReplaced}");
                 DebugLog($"CACHE STATS - Hits:{_cacheHits} Misses:{_cacheMisses} CooldownSkips:{_vehicleCooldownSkips}");
                 DebugLog($"PLATE STATS - PermanentlyChanged:{_permanentlyChangedPlates.Count} ProcessedVehicles:{_processedVehicleIds.Count}");
                 DebugLog("========== SCAN END ==========");
             }
             catch (Exception ex)
             {
-                Log($"[VehicleAttach] Error in scan: {ex.Message}");
+                Log($"[VehicleAttach] CRITICAL ERROR in scan: {ex.Message}");
+                DebugLog($"Stack trace: {ex.StackTrace}");
             }
         }
 
@@ -1894,12 +2914,10 @@ namespace PersistentWorld.Vehicles
                         return false;
                     }
 
-                    // Check if already queued
                     var existingUpdate = _pendingModelUpdates.FirstOrDefault(u => u.Plate == plate);
 
                     if (existingUpdate != null)
                     {
-                        // Update the model if different
                         if (existingUpdate.Model != model)
                         {
                             existingUpdate.Model = model;
@@ -1913,7 +2931,6 @@ namespace PersistentWorld.Vehicles
                         return true;
                     }
 
-                    // Check if failed recently
                     if (_failedUpdateTracker.ContainsKey(plate))
                     {
                         var failedTime = _failedUpdateTracker[plate].FailedTime;
@@ -1928,7 +2945,6 @@ namespace PersistentWorld.Vehicles
                         }
                     }
 
-                    // Add to queue
                     _pendingModelUpdates.Enqueue(new ModelUpdate
                     {
                         Plate = plate,
@@ -1938,13 +2954,11 @@ namespace PersistentWorld.Vehicles
                         LastAttempt = DateTime.Now
                     });
 
-                    // Update last known model
                     lock (_lastKnownModel)
                     {
                         _lastKnownModel[plate] = model;
                     }
 
-                    // Signal the worker thread
                     _updateEvent.Set();
 
                     DebugLog($"Queued model update for plate {plate} to {model} (Queue size: {_pendingModelUpdates.Count})");
@@ -1961,9 +2975,11 @@ namespace PersistentWorld.Vehicles
             return $"SA{number}";
         }
 
-        // Modified: Get person from cache or database with gender detection
+        // Get person from cache or database with safe conversions, incarceration check, and stolen handling
         private Dictionary<string, object> GetPersonFromCache(string driverName, Ped driver, Vehicle vehicle)
         {
+            if (string.IsNullOrEmpty(driverName)) return null;
+
             string cacheKey = driverName.ToLower().Trim();
 
             lock (_cacheLock)
@@ -1999,20 +3015,30 @@ namespace PersistentWorld.Vehicles
             var person = FindBestMatchingPerson(persons, driver, vehicle);
             if (person == null) return null;
 
-            string assignedPlate = GetAssignedPlateForPerson(person);
-            if (string.IsNullOrEmpty(assignedPlate)) return null;
+            if (_config.EnableIncarcerationReplacement && IsPersonIncarcerated(person))
+            {
+                DebugLog($"INCARCERATED PERSON DETECTED: {firstName} {lastName} - finding replacement");
+
+                var replacement = GetRandomNonIncarceratedPersonOfGender(detectedGender);
+
+                if (replacement != null)
+                {
+                    DebugLog($"Replacing incarcerated person with: {SafeConvertToString(replacement.ContainsKey("first_name") ? replacement["first_name"] : null)} {SafeConvertToString(replacement.ContainsKey("last_name") ? replacement["last_name"] : null)}");
+                    person = replacement;
+                    _incarceratedReplaced++;
+                }
+            }
 
             lock (_cacheLock)
             {
                 _nameCache[cacheKey] = new CachedPerson
                 {
                     Person = person,
-                    AssignedPlate = assignedPlate,
+                    AssignedPlate = GetAssignedPlateForPerson(person),
                     FullName = driverName,
                     CachedAt = DateTime.Now,
-                    DetectedGender = detectedGender // NEW: Store detected gender
+                    DetectedGender = detectedGender
                 };
-                DebugLog($"Cached {driverName} - Plate: {assignedPlate} (Gender: {detectedGender})");
             }
 
             return person;
@@ -2020,40 +3046,78 @@ namespace PersistentWorld.Vehicles
 
         private Dictionary<string, object> FindBestMatchingPerson(List<Dictionary<string, object>> persons, Ped driver, Vehicle vehicle)
         {
-            if (persons.Count == 1)
+            try
             {
-                DebugLog("Only one match found, using it");
-                return persons[0];
-            }
+                if (persons == null || persons.Count == 0)
+                    return null;
 
-            DebugLog($"Found {persons.Count} matches for driver, attempting to find best match");
-
-            // Try to match by ped model
-            string driverModel = driver.Model.Name?.ToLower() ?? "";
-            if (!string.IsNullOrEmpty(driverModel))
-            {
-                foreach (var person in persons)
+                if (persons.Count == 1)
                 {
-                    if (person.ContainsKey("model_name"))
+                    DebugLog("Only one match found, using it");
+                    return persons[0];
+                }
+
+                DebugLog($"Found {persons.Count} matches for driver, attempting to find best match");
+
+                string driverModel = "";
+                if (driver != null)
+                {
+                    try
                     {
-                        string dbModel = person["model_name"].ToString().ToLower();
-                        if (!string.IsNullOrEmpty(dbModel) && dbModel == driverModel)
+                        driverModel = driver.Model.Name.ToLower();
+                    }
+                    catch
+                    {
+                        driverModel = "";
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(driverModel))
+                {
+                    foreach (var person in persons)
+                    {
+                        try
                         {
-                            DebugLog($"Matched by ped model: driver={driverModel}, db={dbModel}");
-                            return person;
+                            if (person == null) continue;
+
+                            if (person.ContainsKey("model_name") && person["model_name"] != null)
+                            {
+                                string dbModel = SafeConvertToString(person["model_name"]).ToLower();
+                                if (!string.IsNullOrEmpty(dbModel) && dbModel == driverModel)
+                                {
+                                    DebugLog($"Matched by ped model: driver={driverModel}, db={dbModel}");
+                                    return person;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            DebugLog($"Error checking person model: {ex.Message}");
+                            continue;
                         }
                     }
                 }
-            }
 
-            DebugLog($"Could not determine best match, using first");
-            return persons[0];
+                DebugLog($"Could not determine best match, using first");
+                return persons[0];
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Error in FindBestMatchingPerson: {ex.Message}");
+                return persons?.FirstOrDefault();
+            }
         }
 
         private string GetAssignedPlateForPerson(Dictionary<string, object> person)
         {
             try
             {
+                if (person == null)
+                {
+                    DebugLog("Person is null");
+                    return null;
+                }
+
                 if (!person.ContainsKey("owned_vehicles"))
                 {
                     DebugLog("Person has no owned_vehicles key");
@@ -2068,12 +3132,16 @@ namespace PersistentWorld.Vehicles
                 }
 
                 var firstVehicle = vehicles[0];
+                if (firstVehicle == null) return null;
 
                 if (firstVehicle.ContainsKey("license_plate"))
                 {
-                    string plate = firstVehicle["license_plate"]?.ToString() ?? "";
-                    DebugLog($"First vehicle plate: '{plate}'");
-                    return plate;
+                    string plate = SafeConvertToString(firstVehicle["license_plate"]);
+                    if (!string.IsNullOrEmpty(plate))
+                    {
+                        DebugLog($"First vehicle plate: '{plate}'");
+                        return plate;
+                    }
                 }
 
                 return null;
@@ -2089,6 +3157,8 @@ namespace PersistentWorld.Vehicles
         {
             try
             {
+                if (vehicle == null) return false;
+
                 if (vehicle.Class == VehicleClass.Emergency) return true;
 
                 string modelName = vehicle.Model.Name?.ToLower() ?? "";
@@ -2099,7 +3169,11 @@ namespace PersistentWorld.Vehicles
                     modelName.Contains("fire") ||
                     modelName.Contains("ambulance") ||
                     modelName.Contains("riot") ||
-                    modelName.Contains("pranger"))
+                    modelName.Contains("pranger") ||
+                    modelName.Contains("bcsd") ||
+                    modelName.Contains("ohsp") ||
+                    modelName.Contains("osp") ||
+                    modelName.Contains("ranger"))
                 {
                     return true;
                 }
@@ -2116,6 +3190,8 @@ namespace PersistentWorld.Vehicles
         {
             try
             {
+                if (ped == null) return "";
+
                 Persona persona = Functions.GetPersonaForPed(ped);
 
                 if (persona != null)
@@ -2157,7 +3233,6 @@ namespace PersistentWorld.Vehicles
             return plate.Replace(" ", "").ToUpper().Trim();
         }
 
-        // Check for name changes and driver changes
         private void CheckAndRestoreNames()
         {
             try
@@ -2167,13 +3242,8 @@ namespace PersistentWorld.Vehicles
 
                 _lastNameProtectionCheck = DateTime.Now;
 
-                // Check for driver changes
                 CheckForDriverChanges();
-
-                // Check protected plates
                 CheckProtectedPlates();
-
-                // Debug output
                 DebugLogProtectedPlates();
             }
             catch (Exception ex)
@@ -2182,7 +3252,6 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Generate a unique name
         private Tuple<string, string> GenerateUniqueName()
         {
             Random random = new Random();
@@ -2203,7 +3272,6 @@ namespace PersistentWorld.Vehicles
                 }
             }
 
-            // Fallback: Use numbers
             return new Tuple<string, string>("Person", DateTime.Now.Ticks.ToString().Substring(8));
         }
 
@@ -2256,6 +3324,11 @@ namespace PersistentWorld.Vehicles
             lock (_protectedPlatesLock)
             {
                 _protectedPlates.Clear();
+            }
+
+            lock (_fleetLock)
+            {
+                _activeFleetAssignments.Clear();
             }
 
             lock (_usedNamesLock)
@@ -2321,6 +3394,11 @@ namespace PersistentWorld.Vehicles
                 _protectedPlates.Clear();
             }
 
+            lock (_fleetLock)
+            {
+                _activeFleetAssignments.Clear();
+            }
+
             lock (_usedNamesLock)
             {
                 _usedNames.Clear();
@@ -2373,7 +3451,17 @@ namespace PersistentWorld.Vehicles
                 return _protectedPlates.Count;
             }
         }
-        public int GetGenderCorrections() => _genderCorrections; // NEW
+        public int GetFleetVehiclesCount()
+        {
+            lock (_fleetLock)
+            {
+                return _activeFleetAssignments.Count;
+            }
+        }
+        public int GetFleetVehiclesProcessed() => _fleetVehiclesProcessed;
+        public int GetGenderCorrections() => _genderCorrections;
+        public int GetIncarceratedReplaced() => _incarceratedReplaced;
+        public int GetStolenVehiclesProcessed() => _stolenVehiclesProcessed;
 
         public void SetVerboseDebugging(bool enabled)
         {
@@ -2423,7 +3511,6 @@ namespace PersistentWorld.Vehicles
             _config.Save(_configPath);
         }
 
-        // NEW: Gender correction settings
         public void SetEnableGenderCorrection(bool enabled)
         {
             _config.EnableGenderCorrection = enabled;
@@ -2433,6 +3520,24 @@ namespace PersistentWorld.Vehicles
         public void SetChangePedModelToMatchGender(bool enabled)
         {
             _config.ChangePedModelToMatchGender = enabled;
+            _config.Save(_configPath);
+        }
+
+        public void SetEnableFleetVehicles(bool enabled)
+        {
+            _config.EnableFleetVehicles = enabled;
+            _config.Save(_configPath);
+        }
+
+        public void SetEnableIncarcerationReplacement(bool enabled)
+        {
+            _config.EnableIncarcerationReplacement = enabled;
+            _config.Save(_configPath);
+        }
+
+        public void SetUseDatabaseNamesForStolenVehicles(bool enabled)
+        {
+            _config.UseDatabaseNamesForStolenVehicles = enabled;
             _config.Save(_configPath);
         }
     }
