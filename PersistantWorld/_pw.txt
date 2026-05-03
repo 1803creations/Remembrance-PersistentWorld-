@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Windows.Forms;
 using Rage;
@@ -20,19 +20,6 @@ namespace PersistentWorld
         public Keys ImportStopThePedKey { get; set; } = Keys.F10;
         public Keys ManualScanKey { get; set; } = Keys.F9;
         public Keys ClearCacheKey { get; set; } = Keys.F9;
-
-        // Dispatch menu keys/buttons
-        public Keys DispatchOpenKey { get; set; } = Keys.T;
-        public Keys DispatchUpKey { get; set; } = Keys.Up;
-        public Keys DispatchDownKey { get; set; } = Keys.Down;
-        public Keys DispatchSelectKey { get; set; } = Keys.Enter;
-        public Keys DispatchBackKey { get; set; } = Keys.Back;
-
-        public GameControl DispatchOpenControl { get; set; } = GameControl.ScriptRUp;
-        public GameControl DispatchUpControl { get; set; } = GameControl.ScriptPadUp;
-        public GameControl DispatchDownControl { get; set; } = GameControl.ScriptPadDown;
-        public GameControl DispatchSelectControl { get; set; } = GameControl.FrontendAccept;
-        public GameControl DispatchBackControl { get; set; } = GameControl.FrontendCancel;
 
         // Modifier keys (Ctrl, Shift, Alt)
         public bool ImportStopThePedRequireShift { get; set; } = true;
@@ -156,7 +143,7 @@ namespace PersistentWorld
                 _computerScreen = new ComputerScreen(_databaseManager, _config);
 
                 Game.LogTrivial("[Persistent World] Creating DispatchMenu...");
-                _dispatchMenu = new DispatchMenu(_databaseManager, _config);
+                _dispatchMenu = new DispatchMenu(_databaseManager);
 
                 // Hook into LSPDFR events
                 Game.LogTrivial("[Persistent World] Hooking into OnDutyStateChanged...");
@@ -413,3 +400,4 @@ namespace PersistentWorld
         }
     }
 }
+

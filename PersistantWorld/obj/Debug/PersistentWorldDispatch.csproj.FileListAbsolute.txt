@@ -1,0 +1,12 @@
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorldDispatch.csproj.AssemblyReference.cache
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorldDispatch.csproj.CoreCompileInputs.cache
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\PersistentWorldDispatch.dll
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\PersistentWorldDispatch.pdb
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\LSPD First Response.dll
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\RagePluginHookSDK.dll
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\System.Data.SQLite.dll
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\Microsoft.VisualStudio.QualityTools.UnitTestFramework.dll
+C:\Users\Matt\source\repos\PersistantWorld\bin\Debug\System.Data.SQLite.xml
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorldDispatch.csproj.CopyComplete
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorldDispatch.dll
+C:\Users\Matt\source\repos\PersistantWorld\obj\Debug\PersistentWorldDispatch.pdb

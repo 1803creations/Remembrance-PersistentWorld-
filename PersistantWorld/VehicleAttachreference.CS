@@ -4,7 +4,6 @@ using System.Data.SQLite;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Diagnostics;
 using System.Xml.Serialization;
 using Rage;
 using LSPD_First_Response.Engine.Scripting.Entities;
@@ -490,7 +489,6 @@ namespace PersistentWorld.Vehicles
             public Vehicle CurrentVehicle { get; set; }
             public string ExpectedGender { get; set; }
             public bool IsStolenVehicle { get; set; }  // New flag for stolen vehicles
-            public string ExpectedPedModel { get; set; }
         }
 
         // Cached person data
@@ -1254,11 +1252,11 @@ namespace PersistentWorld.Vehicles
             {
                 lock (_fleetLock)
                 {
-                    // Native reads (Vehicle.LicensePlate) in background threads can cause AVs.
-                    // Keep this cleanup data-only: prune very old assignments by age.
-                    var cutoff = DateTime.Now.AddMinutes(-20);
+                    var allVehicles = World.GetAllVehicles();
+                    if (allVehicles == null) return;
+
                     var deadAssignments = _activeFleetAssignments
-                        .Where(kvp => kvp.Value == null || kvp.Value.AssignedAt < cutoff)
+                        .Where(kvp => !allVehicles.Any(v => v != null && v.Exists() && CleanPlate(v.LicensePlate) == kvp.Key))
                         .Select(kvp => kvp.Key)
                         .ToList();
 
@@ -1411,14 +1409,6 @@ namespace PersistentWorld.Vehicles
                                     if (persona != null)
                                     {
                                         string currentName = persona.FullName;
-                                        string currentGender = persona.Gender.ToString();
-                                        string modelGender = GetModelGender(SafeGetModelName(action.TargetPed));
-                                        bool genderMismatch = false;
-                                        if (_config.EnableGenderCorrection && !string.IsNullOrWhiteSpace(action.TargetGender) && action.TargetGender != "Unknown")
-                                        {
-                                            genderMismatch = (currentGender != action.TargetGender) || (modelGender != action.TargetGender);
-                                        }
-
                                         if (currentName != action.FullName)
                                         {
                                             DebugLog($"Verification failed for plate {action.Plate} - current: {currentName}, expected: {action.FullName}");
@@ -1426,15 +1416,6 @@ namespace PersistentWorld.Vehicles
                                             {
                                                 QueueNameForce(action.TargetPed, action.FirstName, action.LastName,
                                                     action.FullName, action.Plate, action.OriginalPlate, action.TargetGender);
-                                            }
-                                        }
-                                        else if (genderMismatch)
-                                        {
-                                            DebugLog($"Verification: gender mismatch for plate {action.Plate} - current: {currentGender}/{modelGender}, expected: {action.TargetGender}. Reapplying.");
-                                            ForcePedNameInternal(action.TargetPed, action.FirstName, action.LastName, action.TargetGender);
-                                            if (_config.ChangePedModelToMatchGender && modelGender != action.TargetGender)
-                                            {
-                                                ChangePedModel(action.TargetPed, action.TargetGender);
                                             }
                                         }
                                         else
@@ -1559,20 +1540,6 @@ namespace PersistentWorld.Vehicles
             return "Unknown";
         }
 
-        // Determine gender from a ped model name
-        private string GetModelGender(string modelName)
-        {
-            if (string.IsNullOrEmpty(modelName)) return "Unknown";
-            string m = modelName.ToLower();
-
-            if (m.Contains("female") || m.Contains("_f_") || m.StartsWith("a_f_") || m.StartsWith("s_f_") || m.StartsWith("cs_f_"))
-                return "Female";
-            if (m.Contains("male") || m.Contains("_m_") || m.StartsWith("a_m_") || m.StartsWith("s_m_") || m.StartsWith("cs_m_"))
-                return "Male";
-
-            return "Unknown";
-        }
-
         // Get random ped model for gender
         private string GetRandomPedModelForGender(string gender)
         {
@@ -1628,46 +1595,6 @@ namespace PersistentWorld.Vehicles
             }
         }
 
-        // Change ped model to a specific model name (used for stolen vehicle locking)
-        private bool ChangePedModelTo(Ped ped, string modelName)
-        {
-            try
-            {
-                if (ped == null || !ped.Exists()) return false;
-                if (string.IsNullOrWhiteSpace(modelName)) return false;
-
-                Model targetModel = new Model(modelName);
-                if (!targetModel.IsValid)
-                {
-                    DebugLog($"Invalid target ped model: {modelName}");
-                    return false;
-                }
-
-                bool loaded = false;
-                try
-                {
-                    targetModel.LoadAndWait();
-                    loaded = targetModel.IsLoaded;
-                }
-                catch (Exception ex)
-                {
-                    DebugLog($"Error loading model {modelName}: {ex.Message}");
-                    loaded = false;
-                }
-
-                if (!loaded) return false;
-
-                ped.Model = targetModel;
-                DebugLog($"Set ped model to {modelName}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                DebugLog($"Error in ChangePedModelTo: {ex.Message}");
-                return false;
-            }
-        }
-
         // Force a ped's name
         private bool ForcePedNameInternal(Ped ped, string firstName, string lastName, string targetGender)
         {
@@ -1680,27 +1607,34 @@ namespace PersistentWorld.Vehicles
                 Persona currentPersona = Functions.GetPersonaForPed(ped);
                 if (currentPersona == null) return false;
 
-                string currentGender = currentPersona.Gender.ToString();
-                string modelGender = GetModelGender(SafeGetModelName(ped));
-                Gender targetPersonaGender = currentPersona.Gender;
-
                 if (_config.EnableGenderCorrection && targetGender != "Unknown")
                 {
-                    targetPersonaGender = targetGender == "Male" ? Gender.Male : Gender.Female;
+                    string currentGender = currentPersona.Gender.ToString();
 
                     if (currentGender != targetGender)
                     {
                         DebugLog($"GENDER MISMATCH DETECTED! Current: {currentGender}, Target: {targetGender}");
-                    }
 
-                    if (_config.ChangePedModelToMatchGender && modelGender != targetGender)
+                        if (_config.ChangePedModelToMatchGender)
+                        {
+                            ChangePedModel(ped, targetGender);
+                        }
+
+                        Gender newGender = targetGender == "Male" ? Gender.Male : Gender.Female;
+                        Persona newPersona = new Persona(firstName, lastName, newGender);
+                        Functions.SetPersonaForPed(ped, newPersona);
+                    }
+                    else
                     {
-                        ChangePedModel(ped, targetGender);
+                        Persona newPersona = new Persona(firstName, lastName, currentPersona.Gender);
+                        Functions.SetPersonaForPed(ped, newPersona);
                     }
                 }
-
-                Persona updatedPersona = new Persona(firstName, lastName, targetPersonaGender);
-                Functions.SetPersonaForPed(ped, updatedPersona);
+                else
+                {
+                    Persona newPersona = new Persona(firstName, lastName, currentPersona.Gender);
+                    Functions.SetPersonaForPed(ped, newPersona);
+                }
 
                 Persona afterPersona = Functions.GetPersonaForPed(ped);
                 if (afterPersona != null)
@@ -1889,17 +1823,6 @@ namespace PersistentWorld.Vehicles
                                     needsCorrection = true;
                                 }
 
-                                if (!string.IsNullOrEmpty(protectedData.ExpectedPedModel))
-                                {
-                                    string currentModel = "";
-                                    currentModel = SafeGetModelName(protectedData.CurrentDriver);
-                                    if (!string.IsNullOrEmpty(currentModel) && !currentModel.Equals(protectedData.ExpectedPedModel, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        DebugLog($"MODEL MISMATCH for STOLEN vehicle {plate}! Current: {currentModel}, Expected: {protectedData.ExpectedPedModel}");
-                                        needsCorrection = true;
-                                    }
-                                }
-
                                 if (needsCorrection)
                                 {
                                     DebugLog($"  - Forcing correction...");
@@ -1915,24 +1838,6 @@ namespace PersistentWorld.Vehicles
                                             protectedData.ExpectedLastName,
                                             expectedName, plate, protectedData.OriginalPlate,
                                             expectedGender);
-                                    }
-
-                                    if (protectedData.IsStolenVehicle || !string.IsNullOrEmpty(protectedData.ExpectedPedModel))
-                                    {
-                                        if (!string.IsNullOrEmpty(protectedData.ExpectedPedModel))
-                                        {
-                                            if (ChangePedModelTo(currentDriver, protectedData.ExpectedPedModel))
-                                            {
-                                                protectedData.ExpectedPedModel = SafeGetModelName(currentDriver) ?? protectedData.ExpectedPedModel;
-                                            }
-                                        }
-                                        else if (expectedGender == "Male" || expectedGender == "Female")
-                                        {
-                                            if (ChangePedModel(currentDriver, expectedGender))
-                                            {
-                                                protectedData.ExpectedPedModel = SafeGetModelName(currentDriver) ?? protectedData.ExpectedPedModel;
-                                            }
-                                        }
                                     }
 
                                     if (protectedData.IsStolenVehicle)
@@ -2703,10 +2608,6 @@ namespace PersistentWorld.Vehicles
 
                         _totalDatabaseMatches++;
 
-                        string[] driverParts = driverName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                        string driverFirst = driverParts.Length > 0 ? driverParts[0] : "";
-                        string driverLast = driverParts.Length > 1 ? string.Join(" ", driverParts.Skip(1)) : "";
-
                         string assignedPlate = GetAssignedPlateForPerson(person);
                         if (string.IsNullOrEmpty(assignedPlate))
                         {
@@ -2718,23 +2619,13 @@ namespace PersistentWorld.Vehicles
                         string assignedPlateClean = CleanPlate(assignedPlate);
                         DebugLog($"Assigned plate from database: '{assignedPlate}' (clean: '{assignedPlateClean}')");
 
-                        // Check if vehicle is stolen first (current plate or assigned plate)
+                        // Check if vehicle is stolen first
                         bool isStolen = false;
                         string originalPlate = currentPlateClean;
-                        string ownerFirstName = SafeConvertToString(person.ContainsKey("first_name") ? person["first_name"] : null);
-                        string ownerLastName = SafeConvertToString(person.ContainsKey("last_name") ? person["last_name"] : null);
                         var vehicleData = _database.GetVehicleByPlate(originalPlate);
                         if (vehicleData != null)
                         {
                             isStolen = IsVehicleStolen(vehicleData);
-                        }
-                        if (!isStolen && assignedPlateClean != originalPlate)
-                        {
-                            var assignedVehicleData = _database.GetVehicleByPlate(assignedPlateClean);
-                            if (assignedVehicleData != null)
-                            {
-                                isStolen = IsVehicleStolen(assignedVehicleData);
-                            }
                         }
 
                         // ===== STOLEN VEHICLE HANDLING =====
@@ -2746,21 +2637,22 @@ namespace PersistentWorld.Vehicles
                             string stolenDriverLastName = "";
                             string stolenDriverFullName = "";
                             string stolenDriverGender = "Unknown";
-                            Persona currentPersona = Functions.GetPersonaForPed(driver);
 
-                            // Prefer a different person from the database (not the owner)
+                            // Try to get a different person from the database (exclude the owner)
                             var alternativePerson = GetRandomPersonExcludingCurrent(person);
 
                             if (alternativePerson != null)
                             {
                                 stolenDriverFirstName = SafeConvertToString(alternativePerson.ContainsKey("first_name") ? alternativePerson["first_name"] : null);
                                 stolenDriverLastName = SafeConvertToString(alternativePerson.ContainsKey("last_name") ? alternativePerson["last_name"] : null);
+                                stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
                                 stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
-                                DebugLog($"STOLEN VEHICLE: Assigned alternative DB driver {stolenDriverFirstName} {stolenDriverLastName} to stolen vehicle {originalPlate}");
+
+                                DebugLog($"STOLEN VEHICLE: Assigned alternative DB driver {stolenDriverFullName} to stolen vehicle {originalPlate}");
                             }
                             else
                             {
-                                // Fallback: use random DB name
+                                // Fallback: use names from database if available
                                 var namesFromDB = GetAllNamesFromDatabase();
                                 if (namesFromDB.Count > 0)
                                 {
@@ -2768,65 +2660,22 @@ namespace PersistentWorld.Vehicles
                                     var randomName = namesFromDB[rand.Next(namesFromDB.Count)];
                                     stolenDriverFirstName = randomName.Item1;
                                     stolenDriverLastName = randomName.Item2;
+                                    stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
                                     stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
-                                    DebugLog($"STOLEN VEHICLE: Using random DB name {stolenDriverFirstName} {stolenDriverLastName} for stolen vehicle {originalPlate}");
+                                    DebugLog($"STOLEN VEHICLE: Using random DB name {stolenDriverFullName} for stolen vehicle {originalPlate}");
                                 }
                                 else
                                 {
-                                    // Ultimate fallback: unique generated name
-                                    var unique = GenerateUniqueName();
-                                    stolenDriverFirstName = unique.Item1;
-                                    stolenDriverLastName = unique.Item2;
+                                    // Ultimate fallback
+                                    stolenDriverFirstName = _config.DefaultFirstName;
+                                    stolenDriverLastName = _config.DefaultLastName;
+                                    stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
                                     stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
-                                    DebugLog($"STOLEN VEHICLE: Using unique fallback name {stolenDriverFirstName} {stolenDriverLastName} for stolen vehicle {originalPlate}");
+                                    DebugLog($"STOLEN VEHICLE: Using default name {stolenDriverFullName} for stolen vehicle {originalPlate}");
                                 }
                             }
-
-                            // Ensure stolen driver name differs from owner/driver; try a few DB names before unique
-                            var namesPool = GetAllNamesFromDatabase();
-                            int attempts = 5;
-                            Random nameRand = new Random();
-                            while (attempts-- > 0 && (IsSameName(stolenDriverFirstName, stolenDriverLastName, ownerFirstName, ownerLastName) ||
-                                                      IsSameName(stolenDriverFirstName, stolenDriverLastName, driverFirst, driverLast)))
-                            {
-                                if (namesPool.Count > 0)
-                                {
-                                    var rnd = namesPool[nameRand.Next(namesPool.Count)];
-                                    stolenDriverFirstName = rnd.Item1;
-                                    stolenDriverLastName = rnd.Item2;
-                                    stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
-                                }
-                                else
-                                {
-                                    break;
-                                }
-                            }
-
-                            if (IsSameName(stolenDriverFirstName, stolenDriverLastName, ownerFirstName, ownerLastName) ||
-                                IsSameName(stolenDriverFirstName, stolenDriverLastName, driverFirst, driverLast))
-                            {
-                                var unique = GenerateUniqueName();
-                                stolenDriverFirstName = unique.Item1;
-                                stolenDriverLastName = unique.Item2;
-                                stolenDriverGender = DetectGenderFromName(stolenDriverFirstName);
-                                DebugLog($"STOLEN VEHICLE: Forced unique stolen driver name {stolenDriverFirstName} {stolenDriverLastName}");
-                            }
-
-                            stolenDriverFullName = $"{stolenDriverFirstName} {stolenDriverLastName}";
-
-                            // Ensure stolen driver name differs from owner/driver
-                            // Unique name already generated; no owner match possible
-
-                            // Immediately set persona to the stolen driver and update local driverName variable
-                            Gender stolenGenderEnum = stolenDriverGender == "Male" ? Gender.Male :
-                                                      stolenDriverGender == "Female" ? Gender.Female :
-                                                      (currentPersona != null ? currentPersona.Gender : Gender.Male);
-                            Persona stolenPersona = new Persona(stolenDriverFirstName, stolenDriverLastName, stolenGenderEnum);
-                            Functions.SetPersonaForPed(driver, stolenPersona);
-                            driverName = stolenDriverFullName;
 
                             // Force the stolen vehicle driver to have the alternative database name
-                            ForcePedNameInternal(driver, stolenDriverFirstName, stolenDriverLastName, stolenDriverGender);
                             for (int i = 0; i < Math.Max(5, _config.NameForceAttempts); i++)
                             {
                                 QueueNameForce(driver, stolenDriverFirstName, stolenDriverLastName,
@@ -2843,7 +2692,6 @@ namespace PersistentWorld.Vehicles
                                     ExpectedLastName = stolenDriverLastName,       // Alternative DB name
                                     ExpectedFullName = stolenDriverFullName,      // Alternative DB name
                                     ExpectedGender = stolenDriverGender,
-                                    ExpectedPedModel = SafeGetModelName(driver),
                                     ProtectedSince = DateTime.Now,
                                     OriginalPlate = originalPlate,
                                     ForceCount = 0,
@@ -2858,15 +2706,6 @@ namespace PersistentWorld.Vehicles
                             QueueNameVerification(driver, stolenDriverFirstName, stolenDriverLastName,
                                 stolenDriverFullName, originalPlate, originalPlate, stolenDriverGender);
 
-                            // If we know the target gender, ensure the ped model matches for stolen drivers
-                            if (stolenDriverGender == "Male" || stolenDriverGender == "Female")
-                            {
-                                if (ChangePedModel(driver, stolenDriverGender))
-                                {
-                                    try { _protectedPlates[originalPlate].ExpectedPedModel = SafeGetModelName(driver); } catch { }
-                                }
-                            }
-
                             // Use the alternative name for duplicate tracking
                             string stolenNameKey = GetNameKey(stolenDriverFirstName, stolenDriverLastName);
                             lock (_usedNamesLock)
@@ -2876,10 +2715,6 @@ namespace PersistentWorld.Vehicles
 
                             _stolenVehiclesProcessed++;
                             _lastVehicleProcessTime[vehicleId] = DateTime.Now;
-
-                            // Update stolen vehicle's model in DB as well
-                            if (QueueModelUpdate(originalPlate, currentModel))
-                                updatesQueued++;
 
                             // Mark as permanently processed to avoid re-scanning
                             _permanentlyChangedPlates.Add(originalPlate);
@@ -2957,7 +2792,6 @@ namespace PersistentWorld.Vehicles
                                         ExpectedLastName = correctLastName,
                                         ExpectedFullName = correctFullName,
                                         ExpectedGender = correctGender,
-                                        ExpectedPedModel = SafeGetModelName(driver),
                                         ProtectedSince = DateTime.Now,
                                         OriginalPlate = currentPlateClean,
                                         ForceCount = 0,
@@ -3013,7 +2847,6 @@ namespace PersistentWorld.Vehicles
                                                 ExpectedLastName = correctLastName,
                                                 ExpectedFullName = correctFullName,
                                                 ExpectedGender = correctGender,
-                                                ExpectedPedModel = SafeGetModelName(driver),
                                                 ProtectedSince = DateTime.Now,
                                                 OriginalPlate = currentPlateClean,
                                                 ForceCount = 0,
@@ -3398,24 +3231,6 @@ namespace PersistentWorld.Vehicles
             if (string.IsNullOrEmpty(plate))
                 return plate;
             return plate.Replace(" ", "").ToUpper().Trim();
-        }
-
-        private string SafeGetModelName(Ped ped)
-        {
-            try
-            {
-                return ped != null ? ped.Model.Name ?? "" : "";
-            }
-            catch
-            {
-                return "";
-            }
-        }
-
-        private bool IsSameName(string first1, string last1, string first2, string last2)
-        {
-            return string.Equals(first1?.Trim(), first2?.Trim(), StringComparison.OrdinalIgnoreCase) &&
-                   string.Equals(last1?.Trim(), last2?.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
         private void CheckAndRestoreNames()

@@ -57,6 +57,7 @@
   <ItemGroup>
     <Compile Include="Computer\ComputerScreen.cs" />
     <Compile Include="Database\DatabaseManager.cs" />
+    <Compile Include="DispatchMenu.cs" />
     <Compile Include="PersistentWorld.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="VehicleAttach.CS" />

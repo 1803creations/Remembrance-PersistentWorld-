@@ -196,6 +196,7 @@ namespace PersistentWorld.Database
                     "ALTER TABLE peds ADD COLUMN incarcerated_date DATETIME",
                     "ALTER TABLE peds ADD COLUMN incarcerated_days INTEGER DEFAULT 0",
                     "ALTER TABLE peds ADD COLUMN release_date DATETIME",
+                    "ALTER TABLE peds ADD COLUMN photo_path TEXT",
 
                     // Add new vehicle columns if they don't exist
                     "ALTER TABLE vehicles ADD COLUMN registration_expiry TEXT DEFAULT '2026-12-01'",
@@ -469,6 +470,98 @@ namespace PersistentWorld.Database
             return results;
         }
 
+        // NEW: Get people by gender (for finding random non-incarcerated replacements)
+        public List<Dictionary<string, object>> GetPeopleByGender(string gender, bool nonIncarceratedOnly = true)
+        {
+            var results = new List<Dictionary<string, object>>();
+
+            string query = @"
+                SELECT 
+                    p.id,
+                    p.first_name,
+                    p.last_name,
+                    p.home_address,
+                    p.license_number,
+                    p.license_status,
+                    p.license_reason,
+                    p.license_expiry,
+                    p.license_class,
+                    p.model_name,
+                    p.gender,
+                    p.date_of_birth,
+                    p.has_home,
+                    p.home_type,
+                    p.home_coord_x,
+                    p.home_coord_y,
+                    p.home_coord_z,
+                    p.is_home_percent,
+                    p.is_driving_percent,
+                    p.in_world_percent,
+                    p.is_carrying_gun_percent,
+                    p.is_wanted,
+                    p.wanted_reason,
+                    p.wanted_last_seen,
+                    p.is_incarcerated,
+                    p.incarcerated_reason,
+                    p.incarcerated_days,
+                    p.release_date,
+                    p.is_active,
+                    -- Get ALL vehicles for this person
+                    GROUP_CONCAT(v.id || '|' || v.license_plate || '|' || v.vehicle_model || '|' || 
+                                v.color_primary || '|' || v.color_secondary, ';') as vehicles_data
+                FROM peds p
+                LEFT JOIN vehicles v ON v.owner_type = 'person' AND v.owner_id = p.id AND v.is_active = 1
+                WHERE p.gender = @gender 
+                  AND p.is_active = 1";
+
+            if (nonIncarceratedOnly)
+            {
+                query += " AND (p.is_incarcerated IS NULL OR p.is_incarcerated = 0 OR p.is_incarcerated = '0')";
+            }
+
+            query += " GROUP BY p.id ORDER BY RANDOM() LIMIT 50"; // Get up to 50 random people
+
+            using (var cmd = new SQLiteCommand(query, _connection))
+            {
+                cmd.Parameters.AddWithValue("@gender", gender);
+
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var person = new Dictionary<string, object>();
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            string columnName = reader.GetName(i);
+                            if (!reader.IsDBNull(i))
+                            {
+                                person[columnName] = reader.GetValue(i);
+                            }
+                            else
+                            {
+                                person[columnName] = null;
+                            }
+                        }
+
+                        // Parse vehicles_data into owned_vehicles list
+                        if (person.ContainsKey("vehicles_data") && person["vehicles_data"] != null)
+                        {
+                            string vehiclesData = person["vehicles_data"].ToString();
+                            person["owned_vehicles"] = ParseVehiclesData(vehiclesData);
+                        }
+                        else
+                        {
+                            person["owned_vehicles"] = new List<Dictionary<string, object>>();
+                        }
+
+                        results.Add(person);
+                    }
+                }
+            }
+
+            return results;
+        }
+
         private List<Dictionary<string, object>> ParseVehiclesData(string vehiclesData)
         {
             var vehicles = new List<Dictionary<string, object>>();
@@ -601,6 +694,144 @@ namespace PersistentWorld.Database
             return result;
         }
 
+
+        // Simple person lookup helpers for dispatch checks
+        public Dictionary<string, object> LookupPersonByName(string firstName, string lastName)
+        {
+            if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+                return null;
+
+            const string query = @"
+                SELECT 
+                    p.*, 
+                    GROUP_CONCAT(v.id || '|' || v.license_plate || '|' || v.vehicle_model || '|' || 
+                                 v.color_primary || '|' || v.color_secondary || '|' ||
+                                 IFNULL(v.registration_expiry, '') || '|' || IFNULL(v.insurance_expiry, '') || '|' ||
+                                 IFNULL(v.is_impounded, 0) || '|' || IFNULL(v.is_stolen, 0), ';') as vehicles_data
+                FROM peds p
+                LEFT JOIN vehicles v ON v.owner_type = 'person' AND v.owner_id = p.id AND v.is_active = 1
+                WHERE p.first_name = @first AND p.last_name = @last AND p.is_active = 1
+                GROUP BY p.id
+                LIMIT 1";
+
+            using (var command = new SQLiteCommand(query, _connection))
+            {
+                command.Parameters.AddWithValue("@first", firstName);
+                command.Parameters.AddWithValue("@last", lastName);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read()) return null;
+
+                    return BuildPersonDictionaryFromReader(reader);
+                }
+            }
+        }
+
+        public Dictionary<string, object> LookupPersonById(int pedId)
+        {
+            if (pedId <= 0) return null;
+
+            const string query = @"
+                SELECT 
+                    p.*, 
+                    GROUP_CONCAT(v.id || '|' || v.license_plate || '|' || v.vehicle_model || '|' || 
+                                 v.color_primary || '|' || v.color_secondary || '|' ||
+                                 IFNULL(v.registration_expiry, '') || '|' || IFNULL(v.insurance_expiry, '') || '|' ||
+                                 IFNULL(v.is_impounded, 0) || '|' || IFNULL(v.is_stolen, 0), ';') as vehicles_data
+                FROM peds p
+                LEFT JOIN vehicles v ON v.owner_type = 'person' AND v.owner_id = p.id AND v.is_active = 1
+                WHERE p.id = @id AND p.is_active = 1
+                GROUP BY p.id
+                LIMIT 1";
+
+            using (var command = new SQLiteCommand(query, _connection))
+            {
+                command.Parameters.AddWithValue("@id", pedId);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read()) return null;
+
+                    return BuildPersonDictionaryFromReader(reader);
+                }
+            }
+        }
+
+        private Dictionary<string, object> BuildPersonDictionaryFromReader(SQLiteDataReader reader)
+        {
+            var person = new Dictionary<string, object>();
+
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                string columnName = reader.GetName(i);
+                if (!reader.IsDBNull(i))
+                {
+                    person[columnName] = reader.GetValue(i);
+                }
+                else
+                {
+                    person[columnName] = null;
+                }
+            }
+
+            // Convert owned vehicles from the GROUP_CONCAT field
+            if (person.ContainsKey("vehicles_data") && person["vehicles_data"] != null)
+            {
+                person["owned_vehicles"] = ParseVehiclesData(person["vehicles_data"].ToString());
+            }
+            else
+            {
+                person["owned_vehicles"] = new List<Dictionary<string, object>>();
+            }
+
+            if (person.ContainsKey("id") && person["id"] != null)
+            {
+                int pedId = Convert.ToInt32(person["id"]);
+                person["ticket_history"] = GetPersonTickets(pedId);
+                person["incarceration_history"] = GetIncarcerationHistory(pedId);
+            }
+
+            return person;
+        }
+
+
+        public Dictionary<string, object> LookupCompanyById(int companyId)
+        {
+            if (companyId <= 0) return null;
+
+            var company = new Dictionary<string, object>();
+
+            const string query = @"
+                SELECT c.id, c.name, c.industry, c.headquarters_address, c.phone_number,
+                       COUNT(v.id) as fleet_count
+                FROM companies c
+                LEFT JOIN vehicles v
+                    ON v.owner_type = 'company'
+                    AND v.owner_id = c.id
+                    AND v.is_active = 1
+                WHERE c.id = @companyId
+                GROUP BY c.id, c.name, c.industry, c.headquarters_address, c.phone_number";
+
+            using (var command = new SQLiteCommand(query, _connection))
+            {
+                command.Parameters.AddWithValue("@companyId", companyId);
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read()) return null;
+
+                    for (int i = 0; i < reader.FieldCount; i++)
+                    {
+                        string columnName = reader.GetName(i);
+                        company[columnName] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    }
+                }
+            }
+
+            company["vehicles"] = GetCompanyVehicles(companyId);
+            company["ticket_history"] = GetCompanyTickets(companyId);
+            return company;
+        }
         // NEW METHOD: Get vehicle by plate (simple version)
         public Dictionary<string, object> GetVehicleByPlate(string plate)
         {
@@ -1309,6 +1540,98 @@ namespace PersistentWorld.Database
             }
         }
 
+
+        public void AddCompanyTicket(int companyId, int vehicleId, string offense, int fine, string location)
+        {
+            try
+            {
+                if (companyId <= 0)
+                {
+                    Game.DisplayNotification("~r~Error: Invalid company");
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(offense))
+                {
+                    Game.DisplayNotification("~r~Error: No offense selected");
+                    return;
+                }
+
+                const string companyCheck = "SELECT COUNT(*) FROM companies WHERE id = @companyId";
+                using (var companyCmd = new SQLiteCommand(companyCheck, _connection))
+                {
+                    companyCmd.Parameters.AddWithValue("@companyId", companyId);
+                    long exists = (long)companyCmd.ExecuteScalar();
+                    if (exists == 0)
+                    {
+                        Game.DisplayNotification("~r~Error: Company not found");
+                        return;
+                    }
+                }
+
+                int ticketVehicleId = 0;
+                if (vehicleId > 0)
+                {
+                    const string vehicleCheck = @"
+                        SELECT COUNT(*)
+                        FROM vehicles
+                        WHERE id = @vehicleId
+                          AND owner_type = 'company'
+                          AND owner_id = @companyId";
+
+                    using (var vehicleCmd = new SQLiteCommand(vehicleCheck, _connection))
+                    {
+                        vehicleCmd.Parameters.AddWithValue("@vehicleId", vehicleId);
+                        vehicleCmd.Parameters.AddWithValue("@companyId", companyId);
+                        long vehicleExists = (long)vehicleCmd.ExecuteScalar();
+                        ticketVehicleId = vehicleExists > 0 ? vehicleId : 0;
+                    }
+                }
+
+                const string insert = @"
+                    INSERT INTO tickets (
+                        ped_id,
+                        vehicle_id,
+                        offense,
+                        fine_amount,
+                        issuing_officer,
+                        location,
+                        date_issued,
+                        notes
+                    ) VALUES (
+                        NULL,
+                        @vehicleId,
+                        @offense,
+                        @fine,
+                        @officer,
+                        @location,
+                        @date,
+                        @notes
+                    )";
+
+                using (var command = new SQLiteCommand(insert, _connection))
+                {
+                    if (ticketVehicleId > 0)
+                        command.Parameters.AddWithValue("@vehicleId", ticketVehicleId);
+                    else
+                        command.Parameters.AddWithValue("@vehicleId", DBNull.Value);
+
+                    command.Parameters.AddWithValue("@offense", offense);
+                    command.Parameters.AddWithValue("@fine", fine);
+                    command.Parameters.AddWithValue("@officer", "Officer");
+                    command.Parameters.AddWithValue("@location", string.IsNullOrWhiteSpace(location) ? "Los Santos" : location);
+                    command.Parameters.AddWithValue("@date", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    command.Parameters.AddWithValue("@notes", $"Company ticket (company_id={companyId})");
+
+                    command.ExecuteNonQuery();
+                }
+            }
+            catch (Exception ex)
+            {
+                Game.LogTrivial($"[TICKET ERROR] AddCompanyTicket failed: {ex.Message}");
+                Game.DisplayNotification($"~r~Error issuing company ticket: {ex.Message}");
+            }
+        }
         private List<Dictionary<string, object>> GetVehicleTicketHistory(int vehicleId)
         {
             var tickets = new List<Dictionary<string, object>>();
@@ -1388,6 +1711,73 @@ namespace PersistentWorld.Database
         }
 
         //=============================================================================
+
+        private List<Dictionary<string, object>> GetCompanyVehicles(int companyId)
+        {
+            var vehicles = new List<Dictionary<string, object>>();
+
+            const string query = @"
+                SELECT id, license_plate, vehicle_model, color_primary, color_secondary,
+                       is_stolen, is_impounded, no_registration, no_insurance
+                FROM vehicles
+                WHERE owner_type = 'company'
+                  AND owner_id = @companyId
+                  AND is_active = 1
+                ORDER BY vehicle_model, license_plate";
+
+            using (var command = new SQLiteCommand(query, _connection))
+            {
+                command.Parameters.AddWithValue("@companyId", companyId);
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var vehicle = new Dictionary<string, object>();
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            string columnName = reader.GetName(i);
+                            vehicle[columnName] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                        }
+                        vehicles.Add(vehicle);
+                    }
+                }
+            }
+
+            return vehicles;
+        }
+
+        private List<Dictionary<string, object>> GetCompanyTickets(int companyId)
+        {
+            var tickets = new List<Dictionary<string, object>>();
+
+            const string query = @"
+                SELECT t.*, v.license_plate, v.vehicle_model
+                FROM tickets t
+                JOIN vehicles v ON t.vehicle_id = v.id
+                WHERE v.owner_type = 'company'
+                  AND v.owner_id = @companyId
+                ORDER BY t.date_issued DESC";
+
+            using (var command = new SQLiteCommand(query, _connection))
+            {
+                command.Parameters.AddWithValue("@companyId", companyId);
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var ticket = new Dictionary<string, object>();
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            string columnName = reader.GetName(i);
+                            ticket[columnName] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                        }
+                        tickets.Add(ticket);
+                    }
+                }
+            }
+
+            return tickets;
+        }
         // INCARCERATION METHODS
         //=============================================================================
         private List<Dictionary<string, object>> GetIncarcerationHistory(int pedId)
@@ -1892,39 +2282,39 @@ namespace PersistentWorld.Database
                     has_home, home_type,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
-                    date_of_birth, is_wanted, wanted_reason, is_incarcerated
+                    date_of_birth, is_wanted, wanted_reason, is_incarcerated, photo_path
                 ) VALUES (
                     'Ned', 'Stark', 'player_zero', 'Male', '839 Gibraltar Ave, Vinewood Hills',
                     1, 'Exterior',
                     80, 10, 10, 0,
                     'S1234567', 'Valid', '', '2026-12-31', 'Class C',
-                    '1960-01-15', 0, '', 0
+                    '1960-01-15', 0, '', 0, 'Ned_Stark.png'
                 )",
                 @"INSERT INTO peds (
                     first_name, last_name, model_name, gender, home_address,
                     has_home, home_type,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
-                    date_of_birth, is_wanted, wanted_reason, is_incarcerated
+                    date_of_birth, is_wanted, wanted_reason, is_incarcerated, photo_path
                 ) VALUES (
                     'Tony', 'Soprano', 's_m_y_construct_01', 'Male', '742 Evergreen Terrace, Paleto Bay',
                     1, 'Exterior',
                     20, 60, 20, 30,
                     'S2345678', 'Suspended', 'Failure to appear', '2024-06-15', 'Class C',
-                    '1965-08-22', 1, 'Grand theft auto, Assault', 0
+                    '1965-08-22', 1, 'Grand theft auto, Assault', 0, ''
                 )",
                 @"INSERT INTO peds (
                     first_name, last_name, model_name, gender, home_address,
                     has_home, home_type,
                     is_home_percent, is_driving_percent, in_world_percent, is_carrying_gun_percent,
                     license_number, license_status, license_reason, license_expiry, license_class,
-                    date_of_birth, is_wanted, wanted_reason, is_incarcerated
+                    date_of_birth, is_wanted, wanted_reason, is_incarcerated, photo_path
                 ) VALUES (
                     'Carmela', 'Soprano', 's_f_y_shop_01', 'Female', '742 Evergreen Terrace, Paleto Bay',
                     1, 'Exterior',
                     40, 30, 30, 0,
                     'S3456789', 'Valid', '', '2025-03-20', 'Class C',
-                    '1967-11-03', 0, '', 0
+                    '1967-11-03', 0, '', 0, ''
                 )"
             };
 
@@ -2043,3 +2433,4 @@ namespace PersistentWorld.Database
         }
     }
 }
+
